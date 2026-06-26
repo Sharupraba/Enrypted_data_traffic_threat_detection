@@ -1,764 +1,768 @@
-# Encrypted Traffic Threat Detection — Implementation Plan
+# Encrypted Traffic Threat Detection — Architecture & Implementation Plan
 
-> **Status:** Final reconciled plan (v2.0) — ready for development
-> **Approach:** Non-intrusive, privacy-preserving encrypted traffic analysis using flow metadata, TLS fingerprinting, timing patterns, and ML — zero payload decryption.
+> **Project Title:** Encrypted Traffic Threat Detection using Flow Metadata
+> **Approach:** Privacy-preserving threat detection using flow metadata, timing patterns, packet characteristics, and TLS handshake metadata — zero payload decryption.
+> **Architecture Version:** 2.0 (Simplified, Research-Grade)
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Architecture](#2-architecture)
-3. [Tech Stack](#3-tech-stack)
-4. [Feature Engineering (100+ features)](#4-feature-engineering)
-5. [Phase 1 — Data Collection & Traffic Capture](#phase-1-data-collection--traffic-capture)
-6. [Phase 2 — Feature Engineering](#phase-2-feature-engineering)
-7. [Phase 3 — ML Detection Engine](#phase-3-ml-detection-engine)
-8. [Phase 4 — Threat Intelligence Integration](#phase-4-threat-intelligence-integration)
-9. [Phase 5 — Alert Engine & Dashboard](#phase-5-alert-engine--dashboard)
-10. [Phase 6 — Storage, Performance & Operations](#phase-6-storage-performance--operations)
-11. [Phase 7 — Testing & Documentation](#phase-7-testing--documentation)
-12. [Project Directory Structure](#project-directory-structure)
-13. [Dataset Sources](#dataset-sources)
-14. [Detection Coverage](#detection-coverage)
-15. [Privacy & Compliance](#privacy--compliance)
-16. [Milestones](#milestones)
+2. [Architecture Diagram](#2-architecture-diagram)
+3. [Data Flow Summary](#3-data-flow-summary)
+4. [Phase-by-Phase Breakdown](#4-phase-by-phase-breakdown)
+   - [Phase 1 — Traffic Ingestion Layer](#phase-1--traffic-ingestion-layer)
+   - [Phase 2 — Packet Parsing & Flow Generation](#phase-2--packet-parsing--flow-generation)
+   - [Phase 3 — Metadata & Feature Extraction](#phase-3--metadata--feature-extraction)
+   - [Phase 4 — Feature Engineering](#phase-4--feature-engineering)
+   - [Phase 5 — Machine Learning Detection](#phase-5--machine-learning-detection)
+   - [Phase 6 — Threat Intelligence Enrichment](#phase-6--threat-intelligence-enrichment)
+   - [Phase 7 — Risk Scoring Engine](#phase-7--risk-scoring-engine)
+   - [Phase 8 — Dashboard & Reporting](#phase-8--dashboard--reporting)
+5. [Technology Stack](#5-technology-stack)
+6. [Project Directory Structure](#6-project-directory-structure)
+7. [Dataset Sources](#7-dataset-sources)
+8. [Privacy Guarantee](#8-privacy-guarantee)
+9. [Milestones](#9-milestones)
 
 ---
 
 ## 1. System Overview
 
-A non-intrusive network threat detection system that identifies malicious activity in **encrypted network traffic** using:
+A **privacy-preserving** network threat detection system that identifies malicious activity in encrypted network traffic **without decrypting any packet payloads**.
 
-- **Flow-level statistics** — packet counts, byte ratios, rates, TCP flags
-- **TLS metadata** — JA3/JA3S/JARM fingerprints, cipher suites, SNI entropy, certificate anomalies
-- **Timing patterns** — IAT autocorrelation, FFT-based periodicity, burst detection
-- **DNS correlation** — DGA scoring, NXDOMAIN rates, query entropy
-- **Network graph features** — host connection degree, AS reputation, geolocation anomaly
+### What the System Analyzes
 
-**Privacy guarantee:** Zero payload inspection. GDPR/HIPAA-friendly. Fully on-premise.
+| Category | Features |
+|---|---|
+| **Flow Metadata** | Duration, packet count, byte volumes, packet/byte rates |
+| **Packet Characteristics** | TCP flags, average packet size, header ratios |
+| **Timing Patterns** | Inter-arrival times (IAT), burst detection, periodicity |
+| **TLS Handshake Metadata** | JA3, JA3S, cipher suite, SNI, ALPN, certificate info |
+| **DNS Features** | Domain entropy, query frequency, NXDOMAIN rate |
+
+### Privacy Guarantee
+
+> **Encrypted payloads are NEVER accessed, stored, or inspected at any stage.**
+> All detection is performed exclusively on metadata.
 
 ---
 
-## 2. Architecture
+## 2. Architecture Diagram
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                          TRAFFIC SOURCES                             │
-│    Live NIC capture (AF_PACKET / DPDK)  │  Offline PCAP upload      │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                     PACKET CAPTURE LAYER                             │
-│     libpcap / Scapy / NFStream / DPDK (high-throughput)             │
-│   Raw packets → Session reconstruction → Bidirectional Flow records  │
-│        5-tuple: src IP, dst IP, src port, dst port, protocol         │
-│        Flow timeout: active 120s │ idle 30s                          │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                    FEATURE EXTRACTION ENGINE                         │
-│  ┌─────────────┐ ┌──────────────┐ ┌─────────────┐ ┌─────────────┐  │
-│  │  Flow Stats │ │ TLS Metadata │ │   Timing /  │ │   DNS /     │  │
-│  │             │ │ JA3,JARM,    │ │   IAT / FFT │ │   Graph /   │  │
-│  │ Pkt counts, │ │ Cipher, SNI, │ │   Burst,    │ │   Network   │  │
-│  │ Byte ratios,│ │ Cert, ALPN   │ │ Autocorr    │ │   Features  │  │
-│  │ Flags, Ports│ │              │ │             │ │             │  │
-│  └─────────────┘ └──────────────┘ └─────────────┘ └─────────────┘  │
-│                       → 100+ features per flow                       │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                      ML DETECTION ENGINE                             │
-│  ┌─────────────────────────┐   ┌──────────────────────────────────┐  │
-│  │   Classical ML Models   │   │       Deep Learning Models       │  │
-│  │  - XGBoost / LightGBM  │   │  - 1D-CNN (packet sequences)    │  │
-│  │  - Random Forest        │   │  - LSTM (IAT time series)       │  │
-│  │  - Isolation Forest     │   │  - Autoencoder (zero-day)       │  │
-│  └─────────────────────────┘   └──────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────────────┐ │
-│  │     JA3 / JA3S / JARM Hash Lookup  (Redis — O(1))              │ │
-│  └──────────────────────────────────────────────────────────────────┘ │
-│                     ↓  ENSEMBLE SCORING  ↓                           │
-│  Score = w1×AnomalyScore + w2×ClassifierConf                         │
-│        + w3×JA3Match + w4×DNSScore + w5×ThreatIntelScore            │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│               THREAT INTELLIGENCE ENRICHMENT LAYER                   │
-│   IP Reputation: AbuseIPDB, VirusTotal, Shodan                      │
-│   Domain Intel:  AlienVault OTX, Cisco Umbrella, Quad9              │
-│   TLS:           Salesforce JA3 feed, JARM fingerprint DB            │
-│   Certs:         crt.sh certificate transparency logs                │
-│   MITRE ATT&CK:  TTP mapping per alert                              │
-│   Cache:         Redis async — TTL 1 hour                            │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                ALERT ENGINE & INVESTIGATION LAYER                    │
-│  Severity: Info / Low / Medium / High / Critical                     │
-│  Dedup: hash(src_ip, dst_ip, alert_type) — 5-minute window           │
-│  SHAP explanations per alert (top-5 contributing features)           │
-│  Output formats: JSON │ CEF (SIEM) │ Syslog                         │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                        DASHBOARD (Web UI)                            │
-│  Live Traffic Map │ Alert Feed │ Flow Inspector │ JA3 Explorer       │
-│  Host Risk Score  │ Threat Timeline │ Detection Tuning               │
-└──────────────────────────────────────────────────────────────────────┘
+╔══════════════════════════════════════════════════════════════════════════╗
+║                  ENCRYPTED TRAFFIC THREAT DETECTION SYSTEM               ║
+║                    Flow Metadata · Privacy-Preserving · Research Grade   ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 1 — TRAFFIC INGESTION LAYER                                       │
+│                                                                          │
+│  ┌───────────────────────────┐    ┌──────────────────────────────────┐  │
+│  │   Option A                │    │   Option B                       │  │
+│  │   Live Traffic Monitoring │    │   PCAP Upload                    │  │
+│  │                           │    │                                  │  │
+│  │  • Network Interface      │    │  • .pcap / .pcapng Files         │  │
+│  │  • Real-time Capture      │    │  • Offline Forensic Analysis     │  │
+│  │  • Packet Headers Only    │    │  • Batch Processing              │  │
+│  └─────────────┬─────────────┘    └────────────────┬─────────────────┘  │
+│                │                                    │                    │
+│                └──────────────┬─────────────────────┘                   │
+│                               │  MERGE — Same Pipeline                  │
+└───────────────────────────────┼─────────────────────────────────────────┘
+                                │
+                      OUTPUT: Raw Packet Stream
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 2 — PACKET PARSING & FLOW GENERATION                              │
+│                                                                          │
+│  ┌────────────┐  ┌────────────┐  ┌─────────────┐  ┌─────────────────┐  │
+│  │  Ethernet  │  │    IP      │  │  TCP / UDP  │  │  TLS Handshake  │  │
+│  │   Header   │  │   Header   │  │   Header    │  │     Header      │  │
+│  └────────────┘  └────────────┘  └─────────────┘  └─────────────────┘  │
+│                                                                          │
+│  Bidirectional Flow Builder  (5-tuple key)                               │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  src_ip | dst_ip | src_port | dst_port | protocol                │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│  Flow Timeout:  Active = 120s  │  Idle = 30s                            │
+│  Session Reconstruction: Bidirectional packet grouping                  │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+                      OUTPUT: Flow Records
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 3 — METADATA & FEATURE EXTRACTION            🔒 NO PAYLOAD        │
+│                                                                          │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌────────────────┐    │
+│  │   Flow      │ │    TCP      │ │   Timing    │ │  TLS Metadata  │    │
+│  │  Features   │ │  Features   │ │  Features   │ │                │    │
+│  │             │ │             │ │             │ │  JA3 / JA3S    │    │
+│  │ Duration    │ │ SYN Count   │ │ Mean IAT    │ │  SNI / ALPN    │    │
+│  │ Pkt Count   │ │ ACK Count   │ │ Std IAT     │ │  Cipher Suite  │    │
+│  │ Bytes Sent  │ │ FIN Count   │ │ Min/Max IAT │ │  TLS Version   │    │
+│  │ Bytes Recv  │ │ RST Count   │ │ Burst Count │ │  Certificate   │    │
+│  │ Avg Pkt Sz  │ │ PSH Count   │ │             │ │                │    │
+│  │ Pkts/sec    │ │             │ │             │ │                │    │
+│  │ Bytes/sec   │ │             │ │             │ │                │    │
+│  └─────────────┘ └─────────────┘ └─────────────┘ └────────────────┘    │
+│                          ┌─────────────┐                                │
+│                          │    DNS      │                                 │
+│                          │  Features   │                                 │
+│                          │             │                                 │
+│                          │ Domain      │                                 │
+│                          │ Entropy     │                                 │
+│                          │ Query Freq  │                                 │
+│                          │ NXDOMAIN    │                                 │
+│                          └─────────────┘                                │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+                      OUTPUT: Structured Metadata Dataset
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 4 — FEATURE ENGINEERING                                           │
+│                                                                          │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────────┐  │
+│  │ Missing Value   │  │ Feature Scaling  │  │ Normalization         │  │
+│  │ Handling        │  │ (StandardScaler) │  │ (MinMaxScaler)        │  │
+│  └─────────────────┘  └──────────────────┘  └───────────────────────┘  │
+│  ┌─────────────────┐  ┌──────────────────┐                              │
+│  │ Derived Features│  │ Feature Selection│                              │
+│  │                 │  │ (SelectKBest /   │                              │
+│  │ Upload Ratio    │  │  RandomForest    │                              │
+│  │ Download Ratio  │  │  Importance)     │                              │
+│  │ Packet Rate     │  │                  │                              │
+│  │ Flow Symmetry   │  │                  │                              │
+│  │ Byte Ratio      │  │                  │                              │
+│  │ Header Ratio    │  │                  │                              │
+│  └─────────────────┘  └──────────────────┘                              │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+                      OUTPUT: ML Feature Vector
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 5 — MACHINE LEARNING DETECTION                                    │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  PRIMARY MODEL: Random Forest Classifier                         │   │
+│  │                                                                  │   │
+│  │  • Classify traffic as Threat / Normal                           │   │
+│  │  • Generate Confidence Score (0.0 – 1.0)                        │   │
+│  │  • Feature importance for explainability                         │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  Example Output:                                                         │
+│  ┌──────────────────────────────────┐                                   │
+│  │  Classification : THREAT         │                                   │
+│  │  Confidence     : 93%            │                                   │
+│  └──────────────────────────────────┘                                   │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+                      OUTPUT: ML Prediction + Confidence Score
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 6 — THREAT INTELLIGENCE ENRICHMENT                                │
+│  ⚠  This module DOES NOT detect threats.                                 │
+│     It enriches detections already produced by the ML model.            │
+│                                                                          │
+│  ┌──────────────────┐  ┌─────────────────────┐  ┌──────────────────┐   │
+│  │  IP Reputation   │  │  Domain Reputation  │  │  JA3 Fingerprint │   │
+│  │  Lookup          │  │  Lookup             │  │  Matching        │   │
+│  │                  │  │                     │  │                  │   │
+│  │  → AbuseIPDB     │  │  → VirusTotal       │  │  → JA3 Database  │   │
+│  │  → VirusTotal    │  │                     │  │                  │   │
+│  └──────────────────┘  └─────────────────────┘  └──────────────────┘   │
+│                    ┌──────────────────────────┐                         │
+│                    │ Certificate Reputation   │                         │
+│                    │  → Validity Check        │                         │
+│                    │  → Self-signed Flag      │                         │
+│                    └──────────────────────────┘                         │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+                      OUTPUT: Threat Context
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 7 — RISK SCORING ENGINE                                           │
+│                                                                          │
+│  Risk Score = f(ML Confidence, Threat Intelligence, TLS Metadata)       │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  Score = (0.5 × ML Confidence)                                   │   │
+│  │        + (0.3 × Threat Intel Score)                              │   │
+│  │        + (0.2 × TLS Risk Score)                                  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  Severity Levels:                                                        │
+│  ┌────────┬──────────┬──────────┬──────────┬──────────┐                │
+│  │  SAFE  │   LOW    │  MEDIUM  │   HIGH   │ CRITICAL │                │
+│  │  0–20  │  21–40   │  41–60   │  61–80   │  81–100  │                │
+│  └────────┴──────────┴──────────┴──────────┴──────────┘                │
+│                                                                          │
+│  Example:                                                                │
+│  ┌────────────────────────────────┐                                     │
+│  │  Risk Score : 91               │                                     │
+│  │  Severity   : CRITICAL         │                                     │
+│  └────────────────────────────────┘                                     │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+                      OUTPUT: Risk Score (0–100) + Severity Level
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PHASE 8 — DASHBOARD & REPORTING                                         │
+│                                                                          │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+│  │ System Overview  │  │ Traffic Source   │  │ Live Traffic Monitor │  │
+│  │                  │  │                  │  │                      │  │
+│  │ Total Flows      │  │ ○ Live Monitoring│  │ Src IP | Dst IP      │  │
+│  │ Active Flows     │  │ ○ PCAP Upload    │  │ Protocol | Duration  │  │
+│  │ Threat Count     │  │                  │  │ Risk Score           │  │
+│  │ Detection Acc    │  │                  │  │                      │  │
+│  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+│                                                                          │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+│  │ Threat Alerts    │  │ Flow Details     │  │ ML Analytics         │  │
+│  │                  │  │                  │  │                      │  │
+│  │ Threat Type      │  │ Flow Metadata    │  │ Feature Importance   │  │
+│  │ Confidence       │  │ Timing Features  │  │ Confusion Matrix     │  │
+│  │ Severity         │  │ TLS Metadata     │  │ ROC Curve            │  │
+│  │ Timestamp        │  │                  │  │ Precision/Recall/F1  │  │
+│  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+│                                                                          │
+│  Reports:  [ PDF ]  [ CSV ]  [ JSON ]                                   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Tech Stack
+## 3. Data Flow Summary
 
-| Layer | Technology | Notes |
-|---|---|---|
-| Packet capture | `libpcap`, `Scapy`, `NFStream`, `DPDK` | DPDK for ≥ 10 Gbps line rate |
-| Feature extraction | `pandas`, `numpy`, `scipy` | Statistical + spectral features |
-| TLS fingerprinting | `pyja3`, `dpkt`, custom JARM | JA3, JA3S, JARM hashes |
-| Classical ML | `scikit-learn`, `XGBoost`, `LightGBM` | Fast inference, interpretable |
-| Deep learning | `PyTorch` — LSTM, 1D-CNN, Autoencoder | Sequence + anomaly modeling |
-| Explainability | `SHAP` | Per-alert feature importance |
-| Backend API | `FastAPI` + WebSocket | Async, real-time alert streaming |
-| Frontend | `React + Vite` + Recharts + Mapbox GL | Live dashboard |
-| Hot storage | `Redis` | JA3 lookup, alert dedup, feature cache |
-| Warm storage | `ClickHouse` / `TimescaleDB` | Time-series flow records |
-| Cold storage | `MinIO` + Parquet | Long-term archive, retraining |
-| Alerts DB | `PostgreSQL` | Alert management, case tracking |
-| Message queue | `Apache Kafka` (prod) / Redis Streams (dev) | Flow event pipeline |
-| Monitoring | `Prometheus` + `Grafana` | Operational observability |
-| Orchestration | Docker Compose → Kubernetes (Helm) | Dev → Production path |
+```
+[Network Interface / PCAP File]
+            │
+            │  Raw Packets (headers only — payload excluded)
+            ▼
+[Packet Parser & Flow Builder]
+            │
+            │  Flow Records: 5-tuple bidirectional flows
+            ▼
+[Metadata & Feature Extractor]
+            │
+            │  Structured Metadata Dataset
+            │  (Flow + TCP + Timing + TLS + DNS features)
+            ▼
+[Feature Engineering Pipeline]
+            │
+            │  ML-Ready Feature Vector
+            ▼
+[Random Forest Classifier]
+            │
+            │  Prediction: Threat / Normal
+            │  Confidence Score: 0–100%
+            ▼
+[Threat Intelligence Enrichment]  ←— Only for flagged flows
+            │
+            │  Threat Context (IP, Domain, JA3, Certificate reputation)
+            ▼
+[Risk Scoring Engine]
+            │
+            │  Risk Score: 0–100
+            │  Severity: Safe / Low / Medium / High / Critical
+            ▼
+[Dashboard & Reporting]
+            │
+            └── Live alerts, flow details, ML analytics, export
+```
 
 ---
 
-## 4. Feature Engineering
+## 4. Phase-by-Phase Breakdown
 
-### 4.1 Flow-Level Statistical Features (~25 features)
+### Phase 1 — Traffic Ingestion Layer
 
+**Purpose:** Accept network traffic from two sources and merge into a single processing pipeline.
+
+| Attribute | Details |
+|---|---|
+| **INPUT (Option A)** | Network interface (live real-time capture) |
+| **INPUT (Option B)** | .pcap or .pcapng file (offline forensic analysis) |
+| **Key Constraint** | Packet payload is NEVER captured or stored |
+| **Merge Point** | Both paths produce identical raw packet objects |
+| **OUTPUT** | Raw packet stream (headers only) |
+
+**Technologies:**
+- `Scapy` — live capture + PCAP parsing (cross-platform, Windows-compatible)
+- `libpcap` / `WinPcap` / `Npcap` — underlying capture driver
+- `pyshark` — Wireshark-based PCAP parsing (optional fallback)
+
+---
+
+### Phase 2 — Packet Parsing & Flow Generation
+
+**Purpose:** Parse packet headers and build bidirectional network flows.
+
+| Attribute | Details |
+|---|---|
+| **INPUT** | Raw packet stream |
+| **Headers Parsed** | Ethernet, IP, TCP/UDP, TLS Handshake |
+| **Flow Key** | `(src_ip, dst_ip, src_port, dst_port, protocol)` |
+| **Active Timeout** | 120 seconds |
+| **Idle Timeout** | 30 seconds |
+| **Session Handling** | Bidirectional packet grouping per 5-tuple |
+| **OUTPUT** | Bidirectional flow records |
+
+**Technologies:**
+- `Scapy` — packet parsing
+- `dpkt` — fast header dissection
+- `pandas` — flow record accumulation
+- Custom `FlowTracker` class — timeout management, session reconstruction
+
+---
+
+### Phase 3 — Metadata & Feature Extraction
+
+**Purpose:** Extract only metadata from flow records. Payload is never touched.
+
+> 🔒 **Privacy Rule Enforced Here:** Only headers and handshake metadata are read. No payload bytes are accessed, decoded, or stored at any point.
+
+#### Flow Features
 | Feature | Description |
 |---|---|
-| `flow_duration` | Total flow duration in seconds |
+| `flow_duration` | Total duration in seconds |
 | `total_fwd_packets` | Packets sent src → dst |
 | `total_bwd_packets` | Packets sent dst → src |
-| `total_fwd_bytes` / `total_bwd_bytes` | Byte volumes per direction |
-| `flow_bytes_per_sec` | Total throughput |
-| `flow_packets_per_sec` | Packet rate |
-| `fwd_pkt_len_mean/std/min/max` | Packet size distribution (fwd) |
-| `bwd_pkt_len_mean/std/min/max` | Packet size distribution (bwd) |
-| `down_up_ratio` | bwd_bytes / fwd_bytes (exfil signal) |
-| `fwd_bwd_packet_ratio` | Asymmetry indicator |
-| `avg_packet_size` | Overall average |
-| `byte_symmetry` | \|fwd − bwd\| / total (DDoS signal) |
-| `header_payload_ratio` | Overhead vs. data ratio |
-| `fwd_pkt_len_cv` | Coefficient of variation (C2: very low) |
+| `bytes_sent` | Forward byte volume |
+| `bytes_received` | Backward byte volume |
+| `avg_packet_size` | Overall average packet size |
+| `packets_per_sec` | Packet throughput rate |
+| `bytes_per_sec` | Byte throughput rate |
 
-### 4.2 TCP Flag Features (~10 features)
-
+#### TCP Features
 | Feature | Description |
 |---|---|
-| `fwd_syn/fin/rst/psh/ack/urg_count` | Per-flag packet counts (fwd) |
-| `bwd_syn/fin/rst/psh_count` | Per-flag packet counts (bwd) |
-| `syn_fin_ratio` | SYN-without-FIN = scan indicator |
-| `rst_rate` / `psh_rate` | Flag rate per total packets |
+| `syn_count` | Number of SYN packets |
+| `ack_count` | Number of ACK packets |
+| `fin_count` | Number of FIN packets |
+| `rst_count` | Number of RST packets |
+| `psh_count` | Number of PSH packets |
 
-### 4.3 TLS / SSL Fingerprinting Features (~15 features)
-
+#### Timing Features
 | Feature | Description |
 |---|---|
+| `iat_mean` | Mean inter-arrival time |
+| `iat_std` | Standard deviation of IAT |
+| `iat_min` | Minimum IAT |
+| `iat_max` | Maximum IAT |
+| `burst_count` | Number of traffic bursts detected |
+
+#### TLS Metadata
+| Feature | Description |
+|---|---|
+| `tls_version` | TLS protocol version (1.0 / 1.1 / 1.2 / 1.3) |
+| `cipher_suite` | Negotiated cipher suite identifier |
 | `ja3_hash` | MD5 of TLS ClientHello parameters |
 | `ja3s_hash` | MD5 of TLS ServerHello parameters |
-| `jarm_hash` | Active server TLS fingerprint |
-| `tls_version` / `tls_version_risk` | Version ID + risk score (1.0=SSLv3, 0=TLS1.3) |
-| `tls_is_deprecated` | Flag for TLS < 1.2 |
-| `cipher_suite_id` / `cipher_is_weak` | Cipher ID + weakness flag |
-| `cipher_supports_forward_secrecy` | ECDHE/DHE = 1, RSA = 0 |
-| `sni_value` / `has_sni` | Server Name Indication |
-| `sni_is_ip` | IP address in SNI = suspicious |
-| `sni_label_entropy` | Shannon entropy of domain label (DGA) |
-| `sni_digit_ratio` / `sni_consonant_ratio` | DGA domain character patterns |
-| `alpn_protocol` / `alpn_is_suspicious` | Application protocol over TLS |
-| `tls_extension_count` | Number of ClientHello extensions |
-| `tls_risk_score` | Composite TLS risk (0.0–1.0) |
-
-### 4.4 Certificate Features (~6 features)
-
-| Feature | Description |
-|---|---|
-| `cert_self_signed` | Self-signed certificate flag |
-| `cert_expired` | Certificate past expiry date |
-| `cert_domain_mismatch` | SNI ≠ cert CN/SAN |
+| `alpn` | Application-layer protocol (h2, http/1.1, etc.) |
+| `sni` | Server Name Indication (domain) |
+| `cert_self_signed` | Certificate self-signed flag |
+| `cert_expired` | Certificate past expiry |
 | `cert_days_to_expiry` | Remaining validity days |
-| `cert_is_short_lived` | Valid < 30 days (fresh malware cert) |
-| `cert_issuer_is_known_ca` | Unknown issuer = risk |
 
-### 4.5 Timing / IAT Features (~20 features)
-
+#### DNS Features *(if available)*
 | Feature | Description |
 |---|---|
-| `flow_iat_mean/std/min/max` | Bidirectional IAT statistics (ms) |
-| `fwd_iat_mean/std/min/max` | Forward direction IAT |
-| `bwd_iat_mean/std/min/max` | Backward direction IAT |
-| `iat_autocorrelation` | Periodicity strength (C2 beacon = high) |
-| `iat_periodicity_score` | FFT dominant frequency power |
-| `iat_dominant_frequency` | Main beacon interval |
-| `burst_count` | Number of detected traffic bursts |
-| `burst_avg_size` | Average packets per burst |
-| `time_of_day_score` | Off-hours activity score (0–1) |
-| `day_of_week` | Day encoding for temporal pattern |
-
-### 4.6 Subflow / Burst Features (~8 features)
-
-| Feature | Description |
-|---|---|
-| `subflow_fwd_packets` / `subflow_bwd_packets` | Packets per subflow |
-| `subflow_fwd_bytes` / `subflow_bwd_bytes` | Bytes per subflow |
-| `active_time_mean/std` | Active period statistics |
-| `idle_time_mean/std` | Idle period statistics |
-
-### 4.7 DNS Correlation Features (~8 features)
-
-| Feature | Description |
-|---|---|
-| `dga_score` | N-gram entropy score of queried domain |
-| `nxdomain_rate` | Fraction of NXDOMAIN responses for host |
+| `dns_domain` | Queried domain name |
 | `dns_query_frequency` | Queries per unique domain |
-| `dns_is_newly_registered` | Newly registered domain flag (threat intel) |
-| `dns_record_type_entropy` | Unusual record types (TXT, NULL = tunneling) |
-| `dns_response_size_anomaly` | Oversized DNS responses (tunneling) |
-| `dns_subdomain_level` | Excessive subdomain depth = DGA |
-| `dns_unique_domain_count` | Unique destinations per host per window |
+| `domain_entropy` | Shannon entropy of domain label (DGA signal) |
+| `nxdomain_rate` | Fraction of failed DNS responses |
 
-### 4.8 Graph / Network Features (~8 features)
-
-| Feature | Description |
+| Attribute | Details |
 |---|---|
-| `host_connection_degree` | Unique destination count per source IP |
-| `dst_port_rarity_score` | How unusual is the destination port |
-| `dst_port_is_standard` | Port in {80, 443, 53, 22, 25} |
-| `dst_port_is_high` | Ephemeral port (≥ 49152) |
-| `as_reputation_score` | AS-level reputation from threat feeds |
-| `geo_anomaly_score` | Deviation from historical destination baseline |
-| `internal_fanout_degree` | Lateral movement indicator (internal hosts) |
-| `conversation_symmetry` | Bidirectional flow balance score |
+| **INPUT** | Bidirectional flow records |
+| **OUTPUT** | Structured metadata dataset |
 
-**Total: ~100 features per flow**
+**Technologies:**
+- `pyja3` — JA3 / JA3S hash computation
+- `dpkt` / `cryptography` — TLS handshake parsing
+- `numpy` / `pandas` — feature assembly
+- `scipy` — statistical feature computation
 
 ---
 
-## Phase 1: Data Collection & Traffic Capture
+### Phase 4 — Feature Engineering
 
-**Goal:** Capture raw packet data without touching payload content.
+**Purpose:** Transform extracted metadata into a clean, normalized feature vector ready for ML.
 
-### Components
+| Step | Tool | Description |
+|---|---|---|
+| Missing Value Handling | `pandas`, `SimpleImputer` | Fill NaN with median/zero |
+| Feature Scaling | `StandardScaler` | Mean=0, Std=1 normalization |
+| Normalization | `MinMaxScaler` | Bound features to [0, 1] |
+| Derived Features | Custom Python | Computed ratios and derived signals |
+| Feature Selection | `SelectKBest` / RF Importance | Remove low-information features |
 
-#### Packet Capture Module (`src/capture/`)
-- **Primary:** NFStream — reconstructs bidirectional flows with rich statistics, TLS dissection, and JA3 extraction
-- **Fallback:** Scapy — cross-platform (Windows compatible), basic flow reconstruction
-- Capture only headers: IP, TCP/UDP, TLS handshake metadata — **no payload stored**
-- Support both live NIC capture and offline PCAP file analysis
-- Output: per-flow Parquet records (batch) or JSON over Kafka/Redis (streaming)
-
-#### Flow Aggregation
-- 5-tuple bidirectional flows: `(src_ip, dst_ip, src_port, dst_port, protocol)`
-- Active timeout: 120 seconds | Idle timeout: 30 seconds
-- NFStream handles session reconstruction and bidirectional accounting natively
-
-### Key Data Points Captured (No Payload)
-
-| Field | Source |
+**Derived Features Generated:**
+| Feature | Formula |
 |---|---|
-| Flow duration | Timestamps |
-| Packet inter-arrival times (IAT) | Packet metadata |
-| Packet size distribution | Packet headers only |
-| Bytes/sec, packets/sec | Computed |
-| TCP flags sequence | TCP header |
-| TLS version, cipher suite, SNI | TLS ClientHello |
-| Certificate validity, self-signed flag | TLS handshake |
-| JA3 / JA3S fingerprint | TLS ClientHello / ServerHello |
-| DNS query patterns | DNS headers |
-| ALPN protocol | TLS extension field |
+| `upload_ratio` | `bytes_sent / (bytes_sent + bytes_received)` |
+| `download_ratio` | `bytes_received / (bytes_sent + bytes_received)` |
+| `packet_rate` | `total_packets / flow_duration` |
+| `flow_symmetry` | `1 - abs(fwd_pkts - bwd_pkts) / total_pkts` |
+| `byte_ratio` | `bytes_sent / bytes_received` |
+| `header_ratio` | `header_bytes / total_bytes` |
 
-### Deliverables
-- `src/capture/live_capture.py` — Real-time NIC capture with graceful shutdown
-- `src/capture/pcap_reader.py` — Offline PCAP reader (NFStream + Scapy fallback)
-
----
-
-## Phase 2: Feature Engineering
-
-**Goal:** Transform raw flow records into 100+ discriminative features per flow.
-
-### Feature Pipeline
-```
-Raw PCAP / Live NIC
-      ↓
-[NFStream / Scapy]             ← Packet capture & session reconstruction
-      ↓
-[Flow Aggregator]              ← Bidirectional 5-tuple flow records
-      ↓
-[Feature Extractor]
-  ├── flow_features.py         ← Stats, ratios, TCP flags, rates
-  ├── tls_features.py          ← JA3, JA3S, JARM, ALPN, SNI entropy, cert anomalies
-  ├── timing_features.py       ← IAT stats, FFT periodicity, autocorrelation, burst
-  ├── dns_features.py          ← DGA score, NXDOMAIN rate, query entropy
-  └── graph_features.py        ← Host degree, AS rep, geo anomaly, lateral movement
-      ↓
-[Normalizer / Scaler]          ← StandardScaler / MinMax per feature group
-      ↓
-[Feature Store]                ← Redis (hot, TTL 1h) + Parquet (cold archive)
-```
-
-### Deliverables
-- `src/features/flow_features.py`
-- `src/features/tls_features.py`
-- `src/features/timing_features.py`
-- `src/features/dns_features.py`
-- `src/features/graph_features.py`
-- `src/features/feature_pipeline.py`
-- `notebooks/01_data_exploration.ipynb`
-- `notebooks/02_feature_engineering.ipynb`
-
----
-
-## Phase 3: ML Detection Engine
-
-**Goal:** Classify flows as benign, suspicious, or malicious without payload inspection.
-
-### 3.1 Anomaly Detection — Unsupervised
-- **Isolation Forest** — detects statistical outliers across all flow features
-- **LSTM Autoencoder** — learns normal traffic temporal patterns; high reconstruction error = anomaly
-- Use case: zero-day threats, unknown malware families, insider threats
-
-### 3.2 Supervised Classification
-- **XGBoost / LightGBM** — fast, interpretable gradient boosting on tabular features
-- **Random Forest** — robust to feature noise, handles class imbalance well
-- Trained on: CICIDS2017, CIC-IDS-2018, CIC-IDS-2019, CTU-13, UNSW-NB15, ISCX-VPN-nonVPN
-- Label classes: Benign, C2, Exfiltration, PortScan, DDoS, Botnet, Tunneling, Lateral Movement
-
-### 3.3 TLS Fingerprint Matching
-- JA3 / JA3S / JARM hash lookup against known malicious fingerprint databases
-  - Salesforce JA3 feed, `trisulnetworks/ja3`, JARM fingerprint DB
-- Real-time Redis hash map lookup — O(1) latency
-- Returns confidence score: 1.0 (exact match) → 0.0 (clean)
-
-### 3.4 Deep Sequence Models
-- **1D-CNN** on packet size sequences — detects tunneling and abnormal protocol use
-- **LSTM** on IAT time series — detects C2 beaconing (periodic callbacks)
-- Input: sliding window of last N=50 packets per flow
-
-### 3.5 Ensemble Threat Scoring
-```
-Final Score (0–100) =
-  w1 × AnomalyScore           (Isolation Forest / Autoencoder)
-+ w2 × ClassifierConfidence   (XGBoost / RF probability)
-+ w3 × JA3MatchScore          (TLS fingerprint DB hit)
-+ w4 × DNSRiskScore           (DGA + NXDOMAIN + entropy)
-+ w5 × ThreatIntelScore       (IP/domain reputation enrichment)
-
-Thresholds:
-  ≥ 80 → Critical  |  ≥ 60 → High  |  ≥ 40 → Medium  |  ≥ 20 → Low
-```
-
-### 3.6 SHAP Explainability
-- Per-alert SHAP values computed for every triggered detection
-- Top-5 contributing features surfaced in the alert payload and dashboard
-- Example: *"Alert because `iat_autocorrelation=0.94`, `ja3_match=True`, `sni_label_entropy=4.1`"*
-
-### Deliverables
-- `src/models/classical/random_forest.py`
-- `src/models/classical/xgboost_model.py`
-- `src/models/classical/isolation_forest.py`
-- `src/models/deep/lstm_model.py`
-- `src/models/deep/cnn_model.py`
-- `src/models/deep/autoencoder.py`
-- `src/models/tls_fingerprint.py`
-- `src/models/ensemble.py`
-- `src/models/trainer.py`
-- `src/explainability/shap_explainer.py`
-- `notebooks/03_model_training_classical.ipynb`
-- `notebooks/04_model_training_deep.ipynb`
-- `notebooks/05_ensemble_evaluation.ipynb`
-- `notebooks/06_shap_explainability.ipynb`
-
----
-
-## Phase 4: Threat Intelligence Integration
-
-**Goal:** Enrich each detection with external context to reduce false positives.
-
-### Intelligence Sources
-
-| Source | Enrichment Type | API Method |
-|---|---|---|
-| AbuseIPDB | IP confidence score | REST |
-| VirusTotal | IP / domain / hash reputation | REST |
-| Shodan | Open ports, banners, CVEs per IP | REST |
-| AlienVault OTX | Domain / IP threat pulses | REST |
-| Cisco Umbrella | Domain risk classification | REST |
-| Quad9 | DNS blocking signal | DNS query |
-| Salesforce JA3 | Malicious JA3 hash feed | File sync |
-| crt.sh | Certificate transparency history | REST |
-| MITRE ATT&CK | TTP mapping per alert type | Local STIX bundle |
-
-### Enrichment Pipeline
-```
-Detection fired
-      ↓
-Async Threat Intel Lookup (per IP / SNI / JA3 / cert)
-      ↓
-Redis cache hit? → Return cached result (TTL: 1h)
-      ↓ (cache miss)
-External API call → Store in Redis → Return
-      ↓
-MITRE ATT&CK TTP Tagging
-      ↓
-Enriched Alert → PostgreSQL Alert Store
-```
-
-### MITRE ATT&CK Mapping
-
-| Technique | TTP ID | Detected By |
-|---|---|---|
-| C2 over Web Protocols | T1071.001 | LSTM + FFT (beaconing) |
-| DNS Tunneling | T1071.004 | DNS entropy features |
-| Encrypted Channel | T1573 | TLS risk + JA3 matching |
-| Domain Generation Algorithm | T1568.002 | DGA scorer |
-| Exfiltration Over C2 Channel | T1041 | Upload ratio + flow size |
-| Remote Service Discovery | T1046 | Port scan features |
-| Lateral Tool Transfer | T1570 | Graph fan-out features |
-
-### Deliverables
-- `src/threat_intel/ip_reputation.py`
-- `src/threat_intel/domain_intel.py`
-- `src/threat_intel/ja3_lookup.py`
-- `src/threat_intel/cert_inspector.py`
-- `src/threat_intel/intel_cache.py`
-- `src/detection/mitre_mapper.py`
-
----
-
-## Phase 5: Alert Engine & Dashboard
-
-**Goal:** Surface actionable, analyst-ready insights with full context.
-
-### Alert Engine
-- **Severity tiers:** Info / Low / Medium / High / Critical
-- **Deduplication:** Hash-based on `(src_ip, dst_ip, alert_type)` — 5-minute rolling window
-- **Rate limiting:** Suppress repetitive low-confidence alerts (analyst fatigue control)
-- **Allow-list management:** CIDR ranges, domain patterns, JA3 hash exceptions
-- **Output formats:** JSON, CEF (SIEM integration), Syslog
-
-### Dashboard Views (React + Vite + FastAPI)
-
-| View | Description |
+| Attribute | Details |
 |---|---|
-| **Live Traffic Map** | Real-time geo-map of flows, color-coded by risk score |
-| **Alert Feed** | Live stream: severity badge, MITRE TTP, SHAP top features, timestamp |
-| **Flow Inspector** | All 100+ feature values, model scores, raw packet timeline |
-| **Host Risk Score** | Per-device rolling risk score (last 15-min / 1-hour window) |
-| **JA3 Explorer** | Search TLS fingerprints; see all flows matching a given JA3 |
-| **TLS Certificate View** | Flagged certs: self-signed / expired / mismatched / DGA domain |
-| **Threat Timeline** | Heatmap of alert volume over time, filterable by category |
-| **Detection Tuning** | Adjust per-model thresholds, manage allow-lists, suppress FPs |
+| **INPUT** | Structured metadata dataset |
+| **OUTPUT** | ML feature vector (60–80 normalized features) |
 
-### Deliverables
-- `src/detection/detector.py`
-- `src/detection/alert_engine.py`
-- `src/api/main.py`
-- `src/api/routes/capture.py`
-- `src/api/routes/analysis.py`
-- `src/api/routes/alerts.py`
-- `src/api/routes/flows.py`
-- `src/api/routes/models.py`
-- `src/api/websocket.py`
-- `frontend/` — React + Vite app with all 8 dashboard views
+**Technologies:**
+- `scikit-learn` — `StandardScaler`, `MinMaxScaler`, `SelectKBest`, `SimpleImputer`
+- `pandas` / `numpy` — data transformation
 
 ---
 
-## Phase 6: Storage, Performance & Operations
+### Phase 5 — Machine Learning Detection
 
-**Goal:** Ensure the system runs sustainably at scale with full observability.
+**Purpose:** Primary threat detection. Classify each flow as Threat or Normal.
 
-### Tiered Data Storage
+| Attribute | Details |
+|---|---|
+| **INPUT** | ML feature vector |
+| **PRIMARY MODEL** | Random Forest Classifier |
+| **Output — Class** | Threat / Normal |
+| **Output — Score** | Confidence score (0.0 – 1.0, shown as %) |
+| **Explainability** | Feature importance per prediction |
 
-| Tier | Technology | Retention | Purpose |
-|---|---|---|---|
-| **Hot** | Redis | 1 hour TTL | JA3 lookups, alert dedup, live feature cache |
-| **Warm** | ClickHouse / TimescaleDB | 30 days | Time-series flow records, fast aggregation |
-| **Cold** | MinIO + Parquet | Indefinite | Long-term archive, model retraining corpus |
-| **Alerts** | PostgreSQL | Indefinite | Alert management, analyst notes, case tracking |
+**Model Training Datasets:**
+- CICIDS 2017 / 2018 / 2019
+- UNSW-NB15
+- CTU-13 (botnet C2 traffic)
+- CIC-Bell-DNS-2021 (DNS-based threats)
 
-### Message Queue
-
-| Environment | Technology | Topology |
-|---|---|---|
-| Development | Redis Streams | Single-node, zero dependencies |
-| Production | Apache Kafka | Topics: `flows`, `alerts`, `enriched_alerts` |
-
-### Performance Targets
-
+**Performance Targets:**
 | Metric | Target |
 |---|---|
-| Capture throughput (DPDK) | ≥ 10 Gbps |
-| Capture throughput (AF_PACKET) | ≥ 1 Gbps |
-| Flow classification latency | < 50 ms per flow |
-| Alert generation latency | < 200 ms end-to-end |
-| JA3 lookup latency | < 1 ms (Redis O(1)) |
-| Threat intel enrichment | < 100 ms (async + cached) |
-| Dashboard refresh | ≤ 1 second (WebSocket) |
-
-### Monitoring & Observability
-- **Prometheus** — metrics: flows/sec, alerts/sec, model inference latency, Kafka consumer lag
-- **Grafana** — dashboards: system health, detection statistics, per-model accuracy drift
-- **Structured logging** — JSON logs (structlog) — containerized stdout or ELK
-- **Audit logging** — immutable log of all alert actions and config changes
-
-### Deployment Path
-```
-Local Dev  →  Docker Compose  →  Kubernetes (Helm Charts)
-```
-- Role-based access: Analyst / Admin / Read-only
-- IP anonymization option (last-octet masking) for GDPR/HIPAA
-- Configurable data retention TTL per storage tier
-
-### Deliverables
-- `docker/Dockerfile.backend`
-- `docker/Dockerfile.frontend`
-- `docker/docker-compose.yml`
-- `monitoring/prometheus.yml`
-- `monitoring/grafana-dashboard.json`
-- `k8s/` ─ Helm chart skeleton
-
----
-
-## Phase 7: Testing & Documentation
-
-**Goal:** Validate correctness, measure detection accuracy, package for handoff.
-
-### Testing Strategy
-
-| Test Type | Target | Tool |
-|---|---|---|
-| Unit | Feature extraction correctness | pytest |
-| Unit | Model inference shape / output | pytest |
-| Integration | API endpoints with sample PCAPs | pytest + httpx |
-| Integration | WebSocket live alert stream | pytest-asyncio |
-| System | Full pipeline: PCAP → alert | pytest |
-| Performance | Classification latency benchmark | locust / time |
-
-### Model Evaluation Targets
-
-| Metric | Target |
-|---|---|
-| Weighted F1-score | ≥ 0.90 on CICIDS hold-out |
+| Weighted F1-Score | ≥ 0.90 |
 | ROC-AUC | ≥ 0.95 |
-| False positive rate | ≤ 5% on benign traffic |
-| Inference latency (p99) | < 50 ms |
+| False Positive Rate | ≤ 5% on benign traffic |
+| Inference Latency | < 50 ms per flow |
 
-### Manual Validation Checklist
-- [ ] Upload a real malware PCAP from MalwareBazaar → verify alert fires correctly
-- [ ] Inject synthetic C2 beaconing traffic → verify FFT periodicity score triggers
-- [ ] Run live capture for 10 min on idle host → verify FP rate is < 5%
-- [ ] Verify JA3 lookup fires for a known-bad fingerprint (e.g., Cobalt Strike)
-- [ ] Confirm SHAP explanations describe the correct top features
+**Example Output:**
+```
+Classification : THREAT
+Confidence     : 93%
+Top Features   : iat_autocorrelation, ja3_match, sni_entropy
+```
 
-### Deliverables
-- `tests/test_features.py`
-- `tests/test_models.py`
-- `tests/test_api.py`
-- `tests/fixtures/` — labeled sample PCAPs
-- `README.md` — setup, usage, dataset download instructions
+**Technologies:**
+- `scikit-learn` — RandomForestClassifier
+- `joblib` — model serialization (.pkl)
+- `SHAP` — per-prediction feature importance
 
 ---
 
-## Project Directory Structure
+### Phase 6 — Threat Intelligence Enrichment
+
+**Purpose:** Enrich ML-confirmed detections with external context. This module does NOT perform threat detection.
+
+> ⚠️ **IMPORTANT:** Threat Intelligence Enrichment only runs on flows that the ML model has already classified as threats. It does not generate new alerts.
+
+| Enrichment Function | Source | Output |
+|---|---|---|
+| IP Reputation Lookup | AbuseIPDB, VirusTotal | Malicious IP confidence score |
+| Domain Reputation Lookup | VirusTotal | Domain malice classification |
+| JA3 Fingerprint Matching | JA3 Database (Salesforce / community) | Known-malicious TLS fingerprint match |
+| Certificate Reputation | Self-signed check, expiry, domain mismatch | Certificate risk flags |
+
+**Caching Strategy:**
+- Results cached in-memory (Python `cachetools`) with 1-hour TTL
+- Reduces API calls and latency for repeated IPs/domains
+
+| Attribute | Details |
+|---|---|
+| **INPUT** | ML prediction (for flagged flows only) |
+| **OUTPUT** | Threat context object |
+
+**Technologies:**
+- `requests` / `aiohttp` — REST API calls
+- `cachetools` — local in-memory TTL cache
+- `python-dotenv` — API key management
+
+---
+
+### Phase 7 — Risk Scoring Engine
+
+**Purpose:** Combine ML confidence, threat intelligence, and TLS risk into a single actionable risk score.
+
+**Scoring Formula:**
+```
+Risk Score (0–100) =
+  (0.5 × ML Confidence %)
++ (0.3 × Threat Intel Score %)
++ (0.2 × TLS Risk Score %)
+```
+
+**Severity Mapping:**
+
+| Score Range | Severity | Recommended Action |
+|---|---|---|
+| 0 – 20 | **SAFE** | No action required |
+| 21 – 40 | **LOW** | Log and monitor |
+| 41 – 60 | **MEDIUM** | Investigate |
+| 61 – 80 | **HIGH** | Alert analyst |
+| 81 – 100 | **CRITICAL** | Immediate response |
+
+**Example:**
+```
+ML Confidence     : 93%  × 0.5 = 46.5
+Threat Intel Score: 88%  × 0.3 = 26.4
+TLS Risk Score    : 90%  × 0.2 = 18.0
+─────────────────────────────────────
+Risk Score        : 90.9 → 91
+Severity          : CRITICAL
+```
+
+| Attribute | Details |
+|---|---|
+| **INPUT** | ML confidence + threat context + TLS metadata |
+| **OUTPUT** | Risk score (0–100) + severity level |
+
+**Technologies:**
+- `Python` — scoring formula
+- `numpy` — weighted arithmetic
+
+---
+
+### Phase 8 — Dashboard & Reporting
+
+**Purpose:** Interactive web interface for monitoring, investigation, and reporting.
+
+**Dashboard Sections:**
+
+| Section | Content |
+|---|---|
+| **System Overview** | Total Flows, Active Flows, Threat Count, Detection Accuracy |
+| **Traffic Source** | Toggle: Live Monitoring / PCAP Upload |
+| **Live Traffic Monitor** | Table: Src IP, Dst IP, Protocol, Duration, Risk Score |
+| **Threat Alerts** | Table: Threat Type, Confidence, Severity, Timestamp |
+| **Flow Details** | Flow Metadata, Timing Features, TLS Metadata |
+| **ML Analytics** | Feature Importance chart, Confusion Matrix, ROC Curve, Precision / Recall / F1 |
+| **Reports** | Export: PDF, CSV, JSON |
+
+| Attribute | Details |
+|---|---|
+| **INPUT** | Risk scores, alerts, flow records, ML metrics |
+| **OUTPUT** | Interactive web dashboard + downloadable reports |
+
+**Technologies:**
+- `React + Vite` — frontend framework
+- `FastAPI` — backend REST API + WebSocket
+- `Recharts` — charts and graphs
+- `pdfkit` / `reportlab` — PDF export
+- `pandas` — CSV export
+- WebSocket — real-time live feed
+
+---
+
+## 5. Technology Stack
+
+| Phase | Component | Technology |
+|---|---|---|
+| **Phase 1** | Live Capture | `Scapy`, `Npcap` (Windows), `libpcap` (Linux) |
+| **Phase 1** | PCAP Reading | `Scapy`, `pyshark` |
+| **Phase 2** | Packet Parsing | `Scapy`, `dpkt` |
+| **Phase 2** | Flow Tracking | Custom Python `FlowTracker` |
+| **Phase 3** | TLS Parsing | `pyja3`, `dpkt`, `cryptography` |
+| **Phase 3** | Feature Assembly | `pandas`, `numpy`, `scipy` |
+| **Phase 4** | ML Preprocessing | `scikit-learn` |
+| **Phase 4** | Data Manipulation | `pandas`, `numpy` |
+| **Phase 5** | ML Model | `scikit-learn` RandomForest |
+| **Phase 5** | Model Storage | `joblib` (.pkl files) |
+| **Phase 5** | Explainability | `SHAP` |
+| **Phase 6** | API Calls | `requests`, `aiohttp` |
+| **Phase 6** | Caching | `cachetools` |
+| **Phase 7** | Scoring | `Python`, `numpy` |
+| **Phase 8** | Backend API | `FastAPI` |
+| **Phase 8** | Frontend | `React`, `Vite`, `Recharts` |
+| **Phase 8** | Real-time | WebSocket |
+| **Phase 8** | Database | `SQLite` (local, simple) |
+| **Phase 8** | PDF Export | `reportlab` |
+| **All** | Environment | `python-dotenv`, `.env` |
+| **All** | Config | `pyyaml`, `config.yaml` |
+| **All** | Logging | `Python logging` module |
+
+### What We Removed (and Why)
+
+| Removed Component | Reason |
+|---|---|
+| Kafka | Not needed for a single-machine research system |
+| MinIO | Local filesystem + SQLite is sufficient |
+| ClickHouse | Overkill for research-scale data volumes |
+| Redis | `cachetools` in-memory cache is sufficient |
+| Prometheus + Grafana | Python `logging` + dashboard analytics covers it |
+| Kubernetes + Helm | Not a production deployment — Docker Compose at most |
+| Deep Learning (LSTM, CNN) | Random Forest is the primary model per project spec |
+| DPDK | Not needed for research-grade capture |
+
+---
+
+## 6. Project Directory Structure
 
 ```
 encrypted-traffic-threat-detection/
 │
 ├── data/
-│   ├── raw/                         # Raw PCAP files (git-ignored)
-│   ├── processed/                   # Extracted flow CSVs / Parquet
-│   └── datasets/                    # Public datasets (CICIDS, CTU-13, etc.)
+│   ├── raw/                          # Raw PCAP files (git-ignored)
+│   ├── processed/                    # Extracted flow CSV / Parquet
+│   └── datasets/                     # Public datasets (CICIDS, UNSW-NB15, etc.)
 │
 ├── src/
-│   ├── capture/
-│   │   ├── __init__.py
-│   │   ├── live_capture.py          # Real-time NIC capture (NFStream / AF_PACKET)
-│   │   └── pcap_reader.py           # Offline PCAP analysis (NFStream + Scapy fallback)
 │   │
-│   ├── features/
+│   ├── ingestion/                    # PHASE 1
 │   │   ├── __init__.py
-│   │   ├── flow_features.py         # Packet counts, byte ratios, TCP flags, rates
-│   │   ├── tls_features.py          # JA3, JA3S, JARM, ALPN, SNI entropy, cert anomalies
-│   │   ├── timing_features.py       # IAT stats, FFT periodicity, autocorrelation, burst
-│   │   ├── dns_features.py          # DGA score, NXDOMAIN rate, query entropy
-│   │   ├── graph_features.py        # Host degree, AS reputation, geo anomaly
-│   │   └── feature_pipeline.py      # Full pipeline orchestration + normalization
+│   │   ├── live_capture.py           # Real-time NIC capture (Scapy)
+│   │   └── pcap_reader.py            # Offline PCAP reader (Scapy / pyshark)
 │   │
-│   ├── models/
+│   ├── parsing/                      # PHASE 2
 │   │   ├── __init__.py
-│   │   ├── classical/
-│   │   │   ├── __init__.py
-│   │   │   ├── random_forest.py
-│   │   │   ├── xgboost_model.py
-│   │   │   └── isolation_forest.py
-│   │   ├── deep/
-│   │   │   ├── __init__.py
-│   │   │   ├── lstm_model.py        # LSTM for IAT time-series beaconing detection
-│   │   │   ├── cnn_model.py         # 1D-CNN for packet size sequence classification
-│   │   │   └── autoencoder.py       # LSTM Autoencoder for zero-day anomaly detection
-│   │   ├── tls_fingerprint.py       # JA3 / JA3S / JARM hash matching engine
-│   │   ├── ensemble.py              # Weighted ensemble scoring
-│   │   └── trainer.py               # Model training orchestration
+│   │   ├── packet_parser.py          # Ethernet / IP / TCP / UDP / TLS header parsing
+│   │   └── flow_builder.py           # Bidirectional flow tracker + timeout manager
 │   │
-│   ├── detection/
+│   ├── extraction/                   # PHASE 3
 │   │   ├── __init__.py
-│   │   ├── detector.py              # Main detection engine
-│   │   ├── alert_engine.py          # Alert generation, dedup, rate limiting, allow-list
-│   │   └── mitre_mapper.py          # ATT&CK TTP tagging per alert
+│   │   ├── flow_features.py          # Duration, packet count, bytes, rates
+│   │   ├── tcp_features.py           # SYN, ACK, FIN, RST, PSH counts
+│   │   ├── timing_features.py        # IAT stats, burst detection
+│   │   ├── tls_features.py           # JA3, JA3S, SNI, ALPN, cert, cipher, version
+│   │   ├── dns_features.py           # Domain entropy, NXDOMAIN rate, query frequency
+│   │   └── extractor.py              # Orchestrates all extraction modules
 │   │
-│   ├── explainability/
+│   ├── engineering/                  # PHASE 4
 │   │   ├── __init__.py
-│   │   └── shap_explainer.py        # Per-alert SHAP feature importance
+│   │   ├── preprocessor.py           # Missing value handling, scaling, normalization
+│   │   ├── derived_features.py       # Upload ratio, download ratio, flow symmetry, etc.
+│   │   └── feature_pipeline.py       # End-to-end feature engineering pipeline
 │   │
-│   ├── threat_intel/
+│   ├── detection/                    # PHASE 5
 │   │   ├── __init__.py
-│   │   ├── ip_reputation.py         # AbuseIPDB, VirusTotal, Shodan
-│   │   ├── domain_intel.py          # AlienVault OTX, Cisco Umbrella, Quad9
-│   │   ├── ja3_lookup.py            # Salesforce JA3 / JARM fingerprint DB
-│   │   ├── cert_inspector.py        # crt.sh certificate history
-│   │   └── intel_cache.py           # Redis async TTL cache
+│   │   ├── model.py                  # Random Forest model wrapper (train + predict)
+│   │   ├── trainer.py                # Model training on labelled datasets
+│   │   └── explainer.py             # SHAP feature importance
 │   │
-│   └── api/
+│   ├── enrichment/                   # PHASE 6
+│   │   ├── __init__.py
+│   │   ├── ip_reputation.py          # AbuseIPDB, VirusTotal IP lookup
+│   │   ├── domain_reputation.py      # VirusTotal domain lookup
+│   │   ├── ja3_lookup.py             # JA3 fingerprint database matching
+│   │   ├── cert_checker.py           # Certificate reputation checks
+│   │   └── intel_cache.py            # In-memory TTL cache (cachetools)
+│   │
+│   ├── scoring/                      # PHASE 7
+│   │   ├── __init__.py
+│   │   └── risk_scorer.py            # Weighted risk score + severity classification
+│   │
+│   └── api/                          # PHASE 8 — Backend
 │       ├── __init__.py
-│       ├── main.py                  # FastAPI app entry point + middleware
+│       ├── main.py                   # FastAPI app entry point
 │       ├── routes/
-│       │   ├── __init__.py
-│       │   ├── capture.py           # Start / stop live capture
-│       │   ├── analysis.py          # PCAP upload & batch analysis
-│       │   ├── alerts.py            # Alert CRUD + management
-│       │   ├── flows.py             # Flow query + inspector
-│       │   └── models.py            # Model management + threshold tuning
-│       └── websocket.py             # WebSocket live alert stream
+│       │   ├── capture.py            # Start / stop live capture
+│       │   ├── upload.py             # PCAP file upload + analysis
+│       │   ├── alerts.py             # Alert list, details, export
+│       │   ├── flows.py              # Flow records, flow details
+│       │   └── analytics.py          # ML metrics, feature importance
+│       └── websocket.py              # WebSocket live alert + flow stream
 │
-├── frontend/
+├── frontend/                         # PHASE 8 — React Dashboard
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── Dashboard.jsx
-│   │   │   ├── LiveTrafficMap.jsx
-│   │   │   ├── AlertFeed.jsx
-│   │   │   ├── FlowInspector.jsx
-│   │   │   ├── HostRiskScore.jsx
-│   │   │   ├── JA3Explorer.jsx
-│   │   │   ├── ThreatTimeline.jsx
-│   │   │   └── DetectionTuning.jsx
+│   │   │   ├── SystemOverview.jsx
+│   │   │   ├── TrafficSource.jsx
+│   │   │   ├── LiveTrafficMonitor.jsx
+│   │   │   ├── ThreatAlerts.jsx
+│   │   │   ├── FlowDetails.jsx
+│   │   │   ├── MLAnalytics.jsx
+│   │   │   └── Reports.jsx
 │   │   ├── App.jsx
 │   │   └── main.jsx
 │   ├── package.json
 │   └── vite.config.js
 │
+├── models/                           # Serialized trained models (.pkl)
+│   └── random_forest.pkl
+│
 ├── notebooks/
 │   ├── 01_data_exploration.ipynb
 │   ├── 02_feature_engineering.ipynb
-│   ├── 03_model_training_classical.ipynb
-│   ├── 04_model_training_deep.ipynb
-│   ├── 05_ensemble_evaluation.ipynb
-│   └── 06_shap_explainability.ipynb
-│
-├── models/                          # Serialized trained models (.pkl / .pt)
+│   ├── 03_model_training.ipynb
+│   └── 04_model_evaluation.ipynb
 │
 ├── tests/
 │   ├── __init__.py
-│   ├── test_features.py
-│   ├── test_models.py
-│   ├── test_api.py
-│   └── fixtures/                    # Labeled sample PCAPs for testing
+│   ├── test_flow_builder.py
+│   ├── test_feature_extraction.py
+│   ├── test_model.py
+│   ├── test_risk_scorer.py
+│   └── fixtures/                     # Sample labeled PCAP files
 │
-├── docker/
-│   ├── Dockerfile.backend
-│   ├── Dockerfile.frontend
-│   └── docker-compose.yml
+├── config/
+│   └── config.yaml                   # System configuration (timeouts, thresholds, etc.)
 │
-├── k8s/                             # Kubernetes Helm charts (production)
-│
-├── monitoring/
-│   ├── prometheus.yml
-│   └── grafana-dashboard.json
-│
-├── .env.example                     # Environment variable template
-├── requirements.txt                 # Python dependencies
-└── README.md
+├── .env.example                      # API keys template (AbuseIPDB, VirusTotal)
+├── requirements.txt                  # Python dependencies
+├── README.md
+└── docker-compose.yml                # Optional: containerize backend + frontend
 ```
 
 ---
 
-## Dataset Sources
+## 7. Dataset Sources
 
-| Dataset | Traffic Types | Size | Priority |
-|---|---|---|---|
-| **CICIDS 2017** | DDoS, PortScan, BotNet, Infiltration | ~2.8M flows | 🔴 High |
-| **CIC-IDS 2018** | Brute Force, Infiltration, Web attacks | ~1.5M flows | 🔴 High |
-| **CIC-IDS 2019** | Encrypted malicious flows (TLS-specific) | ~300K flows | 🔴 High |
-| **CTU-13** | Botnet C2, P2P malware (encrypted) | ~1.5M flows | 🔴 High |
-| **UNSW-NB15** | Fuzzers, Backdoors, Exploits, Shellcode | ~2.5M records | 🟡 Medium |
-| **ISCX-VPN-nonVPN** | VPN vs. non-VPN encrypted traffic | ~150K flows | 🟡 Medium |
-| **Malware Traffic Analysis** | Real malware PCAPs, labeled by family | Variable | 🟡 Medium |
-| **Self-generated benign** | Normal enterprise HTTPS traffic baseline | Generated | 🟡 Medium |
+| Dataset | Traffic Types | Priority |
+|---|---|---|
+| **CICIDS 2017** | DDoS, PortScan, BotNet, Infiltration | 🔴 High |
+| **CIC-IDS 2018** | Brute Force, Web Attacks, Infiltration | 🔴 High |
+| **CIC-IDS 2019** | Encrypted malicious flows (TLS-specific) | 🔴 High |
+| **UNSW-NB15** | Fuzzers, Backdoors, Exploits, Shellcode | 🟡 Medium |
+| **CTU-13** | Botnet C2, P2P malware (encrypted) | 🟡 Medium |
+| **CIC-Bell-DNS-2021** | DNS tunneling, DGA | 🟡 Medium |
 
-Download destinations → `data/datasets/<dataset-name>/`
+Download destination: `data/datasets/<dataset-name>/`
 
 ---
 
-## Detection Coverage
+## 8. Privacy Guarantee
 
-| Threat Category | Primary Feature Signals | Detection Method | MITRE TTP |
-|---|---|---|---|
-| **C2 Beaconing** | IAT autocorrelation, fixed packet sizes, periodicity | LSTM + FFT | T1071.001 |
-| **TLS Malware** | JA3/JA3S/JARM fingerprint match | Redis hash lookup | T1573 |
-| **DNS Tunneling** | High-entropy DNS, TXT/NULL records, oversized responses | DNS feature scoring | T1071.004 |
-| **DGA Malware** | Domain n-gram entropy, NXDOMAIN rate | DGA classifier (RF) | T1568.002 |
-| **Data Exfiltration** | Upload ratio, large outbound flows, off-hours timing | XGBoost + Anomaly | T1041 |
-| **Port Scanning** | High connection rate, low bytes/flow, many unique ports | Random Forest | T1046 |
-| **DDoS** | Asymmetric packets, high PPS, SYN flood RST flags | Isolation Forest | — |
-| **Protocol Tunneling** | Port/protocol mismatch, high byte entropy, ALPN anomaly | 1D-CNN | T1573 |
-| **Lateral Movement** | Internal host fan-out, rare internal ports | Graph features + RF | T1570 |
-| **Malware Staging** | Self-signed cert, DGA domain, cert age < 30 days | TLS features + RF | T1105 |
-| **Zero-Day / Unknown** | High reconstruction error from normal traffic baseline | LSTM Autoencoder | — |
-
----
-
-## Privacy & Compliance
-
-| Control | Implementation |
+| Control | Enforcement |
 |---|---|
-| Zero payload inspection | Only headers and metadata processed — enforced at capture layer |
-| IP anonymization | Last-octet masking option for GDPR/HIPAA deployments |
-| Data retention | Configurable TTL per storage tier (Redis / ClickHouse / MinIO) |
-| Role-based access | Analyst / Admin / Read-only — JWT-based RBAC |
-| Audit logging | Immutable log of all alert actions and config changes |
-| On-premise only | No traffic data leaves the network boundary |
-| Allow-list management | CIDR, domain, JA3 hash exceptions for trusted traffic |
+| **Zero payload inspection** | Capture filters discard payload bytes at the packet capture layer |
+| **Header-only parsing** | Parsers only access Ethernet, IP, TCP/UDP, and TLS handshake fields |
+| **No payload storage** | Flow records store only computed statistics, never raw bytes |
+| **TLS metadata only** | TLS parsing reads only the ClientHello / ServerHello header — never the encrypted application data |
+| **On-premise only** | No traffic data is transmitted to external services (only hashes/IPs to threat intel APIs) |
+| **IP anonymization option** | Last-octet masking configurable in `config.yaml` |
 
 ---
 
-## Milestones
+## 9. Milestones
 
 | Phase | Deliverable | Duration |
 |---|---|---|
-| **1** | Packet capture + flow aggregation pipeline (live + offline) | 2 weeks |
-| **2** | Feature engineering — 100+ features + feature store | 2 weeks |
-| **3** | ML models (classical + deep) + SHAP explainability + notebooks | 3 weeks |
-| **4** | Threat intelligence integration + MITRE ATT&CK tagging | 1 week |
-| **5** | Alert engine + FastAPI backend + React dashboard (8 views) | 2 weeks |
-| **6** | Tiered storage + Kafka/Redis pipeline + Prometheus + Grafana + Docker | 2 weeks |
-| **7** | Testing, benchmarking, full README, Helm charts | 2 weeks |
-| **Total** | | **~14 weeks** |
+| **1** | Traffic ingestion — live capture + PCAP reader | 1 week |
+| **2** | Packet parser + bidirectional flow builder | 1 week |
+| **3** | Metadata extraction (Flow + TCP + Timing + TLS + DNS) | 2 weeks |
+| **4** | Feature engineering pipeline | 1 week |
+| **5** | Random Forest model — train, evaluate, serialize | 2 weeks |
+| **6** | Threat intelligence enrichment module | 1 week |
+| **7** | Risk scoring engine | 0.5 week |
+| **8** | FastAPI backend + React dashboard | 2 weeks |
+| **Testing** | Unit tests, integration tests, model validation | 1 week |
+| **Total** | | **~11.5 weeks** |

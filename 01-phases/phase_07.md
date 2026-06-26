@@ -1,237 +1,273 @@
-# Phase 7: Testing & Documentation
+# Phase 7 — Risk Scoring Engine
 
-> **Duration:** 2 weeks | **Depends on:** All previous phases complete | **Feeds into:** Phase 8
-
----
-
-## 1. Objective
-
-Validate detection accuracy, system correctness, latency, and compliance. Produce a complete test suite and all user-facing documentation needed for handoff and deployment.
+> **Position in Pipeline:** Receives enriched threat context from Phase 6 → Outputs Risk Score + Severity Level to Phase 8
+> **Purpose:** Combine ML confidence, threat intelligence results, and TLS metadata into a single, normalized risk score and severity classification.
 
 ---
 
-## 2. Testing Strategy
+## Overview
 
-### 2.1 Test Pyramid
+Phase 7 is a deterministic scoring layer. It takes the three signal sources that have been computed in earlier phases and combines them using a weighted formula to produce:
 
-```
-         ┌──────────────────────────┐
-         │   System / E2E Tests     │  5%  — Full PCAP → alert pipeline
-         ├──────────────────────────┤
-         │  Integration Tests       │  25%  — API, DB, WebSocket, enrichment
-         ├──────────────────────────┤
-         │  Unit Tests              │  70%  — Features, models, alert engine
-         └──────────────────────────┘
-```
+1. A **Risk Score** from 0 to 100
+2. A **Severity Level**: Safe, Low, Medium, High, or Critical
 
-### 2.2 Unit Tests (`tests/test_features.py`)
+Phase 7 does not perform detection or enrichment. It aggregates and normalizes the outputs of Phases 5 and 6.
 
-Feature extraction tests validate correctness using hand-crafted synthetic flow records with known expected outputs:
+---
+
+## Inputs
+
+Phase 7 receives the enriched threat context produced by Phase 6:
 
 ```python
-def test_fwd_pkt_len_cv_low_for_c2_beacon():
-    """C2 beacons use fixed packet sizes → CV should be near 0."""
-    flow = {"fwd_pkt_len_mean": 64.0, "fwd_pkt_len_std": 0.5, ...}
-    features = compute_flow_features(flow)
-    assert features["fwd_pkt_len_cv"] < 0.1
+{
+  "flow_id":                 str,
+  "classification":          str,      # "THREAT" or "NORMAL"
+  "confidence":              float,    # ML model confidence 0.0–1.0
 
-def test_sni_is_ip_detected():
-    flow = {"requested_server_name": "185.220.101.1", ...}
-    features = compute_tls_features(flow)
-    assert features["sni_is_ip"] == 1
+  # From Phase 6 — Threat Intelligence Enrichment
+  "ip_reputation_score":     int,      # 0–100
+  "domain_reputation_score": int,      # 0–100
+  "ja3_match":               bool,
+  "ja3_match_score":         int,      # 0–100
+  "cert_risk_score":         int,      # 0–100
+  "enrichment_available":    bool,
 
-def test_doh_dot_flag_for_cloudflare():
-    flow = {"dst_ip": "1.1.1.1", "dst_port": 443, ...}
-    features = compute_dns_features(flow)
-    assert features["dns_doh_dot_flag"] == 1
-
-def test_encrypted_content_ratio_not_called_header_payload():
-    """Enforce naming convention — no 'header_payload' in feature dicts."""
-    flow = make_dummy_flow()
-    features = compute_flow_features(flow)
-    assert "header_payload_ratio" not in features
-    assert "encrypted_content_ratio" in features
+  # TLS Metadata — from Phase 3 (passed through)
+  "tls_version":             str | None,
+  "cipher_suite":            str | None,
+  "cert_self_signed":        bool | None,
+  "cert_expired":            bool | None,
+  "cert_domain_mismatch":    bool | None,
+  "cert_is_short_lived":     bool | None,
+  "sni":                     str | None,
+  "ja3_hash":                str | None
+}
 ```
 
-### 2.3 ML Model Tests (`tests/test_models.py`)
+---
 
-```python
-def test_isolation_forest_trained_on_benign_only():
-    """Anomaly models must only see benign training data."""
-    trainer = IsolationForestTrainer()
-    assert trainer.training_labels == {"BENIGN"}
+## Scoring Formula
 
-def test_xgboost_inference_latency():
-    """p99 inference time must be < 50ms."""
-    model = load_model("xgboost")
-    batch = generate_feature_vectors(1000)
-    latencies = [timer(model.predict, [row]) for row in batch]
-    assert np.percentile(latencies, 99) < 0.050  # 50ms
-
-def test_ensemble_score_range():
-    """Ensemble score must always be 0–100."""
-    for _ in range(1000):
-        score = ensemble.score(random_feature_vector())
-        assert 0.0 <= score <= 100.0
-
-def test_cic_ids_2019_not_in_training_data():
-    """Enforce held-out test set is never trained on."""
-    training_files = trainer.list_training_sources()
-    assert not any("cic-ids-2019" in f.lower() for f in training_files)
+```
+Risk Score (0–100) =
+  (0.50 × ML Confidence Score)
++ (0.30 × Threat Intelligence Score)
++ (0.20 × TLS Risk Score)
 ```
 
-### 2.4 Integration Tests (`tests/test_api.py`)
+All three components are individually normalized to a 0–100 scale before weighting.
 
-```python
-async def test_pcap_upload_generates_alert():
-    """Upload a known-malicious PCAP → confirm alert is created."""
-    with open("tests/fixtures/cobalt_strike_beacon.pcap", "rb") as f:
-        response = await client.post("/api/v1/flows/upload", files={"file": f})
-    assert response.status_code == 200
-    # Wait for async detection pipeline
-    await asyncio.sleep(2)
-    alerts = await client.get("/api/v1/alerts?severity=HIGH,CRITICAL")
-    assert len(alerts.json()["items"]) > 0
+---
 
-async def test_websocket_alert_stream():
-    """Alerts transmitted over WebSocket within 200ms."""
-    async with websockets.connect("ws://localhost:8000/ws/alerts") as ws:
-        inject_flow(malicious_flow)
-        msg = await asyncio.wait_for(ws.recv(), timeout=0.2)
-        assert json.loads(msg)["type"] == "alert"
+## Component Calculations
 
-async def test_analyst_feedback_stored():
-    alert_id = create_test_alert()
-    await client.post(f"/api/v1/alerts/{alert_id}/feedback",
-                      json={"verdict": "false_positive"})
-    feedback = db.query("SELECT * FROM analyst_feedback WHERE alert_id = $1", alert_id)
-    assert feedback["verdict"] == "false_positive"
+### Component 1 — ML Confidence Score (weight: 50%)
+
+```
+ml_confidence_score = confidence × 100
 ```
 
-### 2.5 Fixture PCAPs (`tests/fixtures/`)
+`confidence` is the probability from Phase 5's `predict_proba` output for the THREAT class. A value of `1.0` maps to a score of `100`.
 
-| File | Content | Expected Outcome |
+For flows classified as `NORMAL`, the ML Confidence Score is treated as `0` and no risk score is computed — the flow is scored as Safe.
+
+---
+
+### Component 2 — Threat Intelligence Score (weight: 30%)
+
+Combines the enrichment signals from Phase 6:
+
+```
+threat_intel_score = max(
+    ip_reputation_score,
+    domain_reputation_score,
+    ja3_match_score
+)
+```
+
+If `enrichment_available` is `False` (APIs unavailable), this component defaults to `0` — neutral, not penalizing.
+
+---
+
+### Component 3 — TLS Risk Score (weight: 20%)
+
+Computed from TLS metadata fields extracted in Phase 3 and passed through Phase 6:
+
+| TLS Signal | Condition | Points Added |
 |---|---|---|
-| `cobalt_strike_beacon.pcap` | Cobalt Strike C2 beaconing | CRITICAL alert, T1071.001 |
-| `port_scan_nmap.pcap` | nmap SYN port scan | HIGH alert, T1046 |
-| `dns_tunneling_iodine.pcap` | iodine DNS tunneling tool | HIGH alert, T1071.004 |
-| `benign_chrome_https.pcap` | Normal Chrome HTTPS browsing | No alert |
-| `dga_malware_sample.pcap` | DGA domain C2 communication | HIGH alert, T1568.002 |
-| `mutual_tls_botnet.pcap` | mTLS C2 authentication | MEDIUM alert |
-| `dot_853_traffic.pcap` | DNS-over-TLS on port 853 | MEDIUM alert (DoT flag) |
-
-### 2.6 Security / Compliance Tests
+| Weak TLS version | TLS version < 1.2 | +40 |
+| Outdated TLS version | TLS version == 1.2 (acceptable) | +15 |
+| Self-signed certificate | `cert_self_signed == True` | +30 |
+| Expired certificate | `cert_expired == True` | +25 |
+| Certificate domain mismatch | `cert_domain_mismatch == True` | +25 |
+| Short-lived certificate | `cert_is_short_lived == True` | +20 |
 
 ```python
-def test_no_payload_captured():
-    """Verify no payload bytes in flow records."""
-    flow_record = capture_single_flow(test_pcap)
-    assert "payload" not in flow_record
-    assert "content" not in flow_record
-    assert "body" not in flow_record
-
-def test_jarm_absent_from_passive_capture():
-    """JARM must not appear in capture or feature modules."""
-    result = subprocess.run(
-        ["grep", "-r", "jarm", "src/capture/", "src/features/"],
-        capture_output=True
-    )
-    assert result.returncode != 0, "JARM found in passive module — remove it"
-
-def test_allowlist_prevents_inference():
-    """Allow-listed flows must produce zero alerts."""
-    add_to_allowlist(cidr="10.0.0.0/8")
-    inject_flow({"src_ip": "10.0.0.42", "dst_ip": "185.220.101.1"})
-    alerts = get_alerts(src_ip="10.0.0.42")
-    assert len(alerts) == 0
+tls_risk_raw = sum of applicable point values (capped at 100)
+tls_risk_score = min(tls_risk_raw, 100)
 ```
 
 ---
 
-## 3. Model Evaluation Report
+## Full Score Calculation Example
 
-Run on **CIC-IDS-2019 held-out test set** (never seen during training). Report:
+```
+ML Confidence     : 93%  × 0.50 = 46.5
+Threat Intel Score: 88%  × 0.30 = 26.4
+TLS Risk Score    : 90%  × 0.20 = 18.0
+─────────────────────────────────────────
+Risk Score        : 90.9 → 91
+Severity          : CRITICAL
+```
 
-| Metric | Target | Actual |
+---
+
+## Severity Level Mapping
+
+| Score Range | Severity | Recommended Action |
 |---|---|---|
-| Weighted F1-score | ≥ 0.82 | TBD |
-| Macro ROC-AUC | ≥ 0.95 | TBD |
-| False Positive Rate (benign class) | ≤ 5% | TBD |
-| Inference latency p99 | < 50ms | TBD |
-| Per-class F1 (C2_BEACONING) | ≥ 0.80 | TBD |
-| Per-class F1 (PORT_SCAN) | ≥ 0.90 | TBD |
-
-Additionally: Evaluate on **self-generated benign traffic** for production FP rate estimation. This is the most operationally meaningful accuracy metric.
+| 0 – 20 | **Safe** | No action required. Flow is benign. |
+| 21 – 40 | **Low** | Log for audit. No immediate action. |
+| 41 – 60 | **Medium** | Investigate. Check correlated flows. |
+| 61 – 80 | **High** | Alert analyst. Prioritize for review. |
+| 81 – 100 | **Critical** | Immediate response required. |
 
 ---
 
-## 4. Manual Validation Checklist
+## Weight Adjustment for Missing Enrichment
 
-- [ ] `cobalt_strike_beacon.pcap` → CRITICAL alert, SHAP shows `iat_autocorrelation` as top feature.
-- [ ] `benign_chrome_https.pcap` → Zero alerts.
-- [ ] `dot_853_traffic.pcap` → MEDIUM alert with `dns_doh_dot_flag=1`.
-- [ ] `mutual_tls_botnet.pcap` → Alert contains `cert_mutual_tls=1`.
-- [ ] Allow-listing `10.0.0.42` → zero subsequent alerts from that IP.
-- [ ] Learning Mode: enable → inject malicious flow → confirm zero alerts generated.
-- [ ] JARM probe button → confirm active probe to test IP returns a hash.
-- [ ] Analyst marks an alert as False Positive → flow appears in `s3://ettd-cold/retraining/confirmed_fp/` within 1 hour.
+When `enrichment_available` is `False`, the component weights are redistributed to avoid under-scoring due to API unavailability:
+
+```
+Adjusted weights when enrichment unavailable:
+  ML Confidence     : 0.70 (was 0.50)
+  Threat Intel Score: 0.00 (unavailable)
+  TLS Risk Score    : 0.30 (was 0.20)
+```
+
+This ensures that the ML prediction still drives the final risk score even without enrichment context.
 
 ---
 
-## 5. Documentation
+## Output
 
-| Document | Content |
+```python
+{
+  # All input fields passed through, plus:
+  "risk_score":           int,    # 0–100 final score
+  "severity":             str,    # "Safe" | "Low" | "Medium" | "High" | "Critical"
+
+  # Score breakdown (for dashboard display and audit)
+  "ml_contribution":      float,  # ML component × weight
+  "ti_contribution":      float,  # Threat Intel component × weight
+  "tls_contribution":     float,  # TLS component × weight
+
+  # Component scores (before weighting)
+  "ml_confidence_score":     int,
+  "threat_intel_score":      int,
+  "tls_risk_score":          int
+}
+```
+
+---
+
+## Normal Flow Handling
+
+Flows classified as `NORMAL` by Phase 5 do NOT go through Phase 6 enrichment and produce a minimal Phase 7 output:
+
+```python
+{
+  "flow_id":     str,
+  "risk_score":  0,
+  "severity":    "Safe"
+}
+```
+
+These are recorded but do not generate alerts.
+
+---
+
+## Input / Output Summary
+
+| Attribute | Details |
 |---|---|
-| `README.md` | Quick start, architecture overview, dataset links, API key setup |
-| `docs/deployment.md` | Docker Compose + Kubernetes step-by-step |
-| `docs/dataset_guide.md` | Download instructions for all 6 datasets + pre-processing steps |
-| `docs/feature_dictionary.md` | All 100+ features: name, formula, interpretation |
-| `docs/analyst_guide.md` | Dashboard walkthrough, alert triage workflow, how to read SHAP |
-| `docs/api_reference.md` | Auto-generated OpenAPI spec from FastAPI |
-| `CHANGELOG.md` | Version history |
+| **INPUT** | Enriched threat context (from Phase 6, for THREAT flows) or ML prediction (for NORMAL flows) |
+| **OUTPUT** | Risk Score (0–100) + Severity Level (Safe / Low / Medium / High / Critical) |
 
 ---
 
-## 6. CI/CD (GitHub Actions)
+## Module: `src/scoring/risk_scorer.py`
+
+```python
+def compute_tls_risk_score(tls_fields: dict) -> int:
+    """
+    Evaluates TLS metadata fields and returns a risk score 0–100.
+    Uses additive point system capped at 100.
+    """
+
+def compute_threat_intel_score(enrichment: dict) -> int:
+    """
+    Derives a single 0–100 score from the enrichment signals.
+    Returns 0 if enrichment_available is False.
+    """
+
+def compute_risk_score(context: dict) -> dict:
+    """
+    Main entry point. Takes enriched threat context from Phase 6.
+    Returns the final risk score, severity level, and component breakdown.
+    """
+```
+
+---
+
+## Configuration (config.yaml)
 
 ```yaml
-on: [push, pull_request]
-jobs:
-  test:
-    - pytest tests/ --cov=src --cov-report=xml
-    - assert coverage > 80%
-  lint:
-    - ruff check src/
-    - mypy src/ --strict
-  compliance:
-    - grep -r "jarm" src/capture/ src/features/ && exit 1    # JARM must not appear
-    - grep -r "header_payload_ratio" src/ && exit 1           # Naming enforcement
-    - grep -r "payload" src/capture/ && exit 1               # No payload access
+risk_scoring:
+  weights:
+    ml_confidence:    0.50
+    threat_intel:     0.30
+    tls_risk:         0.20
+
+  # Weights used when enrichment is unavailable
+  fallback_weights:
+    ml_confidence:    0.70
+    threat_intel:     0.00
+    tls_risk:         0.30
+
+  severity_thresholds:
+    safe:     20
+    low:      40
+    medium:   60
+    high:     80
+    critical: 100
+
+  tls_risk_points:
+    tls_version_below_1_2:    40
+    tls_version_1_2:          15
+    cert_self_signed:         30
+    cert_expired:             25
+    cert_domain_mismatch:     25
+    cert_short_lived:         20
 ```
 
 ---
 
-## 7. Deliverables
+## Technologies
+
+| Component | Technology | Notes |
+|---|---|---|
+| Scoring formula | Python | Deterministic weighted arithmetic |
+| Numerical operations | `numpy` | Weighted sum, clipping |
+| Output formatting | Python `dataclass` | Structured output dict |
+
+---
+
+## Deliverables
 
 | File | Description |
 |---|---|
-| `tests/test_features.py` | Feature extraction unit tests |
-| `tests/test_models.py` | Model correctness + performance tests |
-| `tests/test_api.py` | API + WebSocket integration tests |
-| `tests/test_security.py` | Compliance / no-payload / JARM tests |
-| `tests/fixtures/` | 7 labeled sample PCAPs |
-| `README.md` | Final project README |
-| `docs/` | All documentation files |
-| `.github/workflows/ci.yml` | CI/CD pipeline |
-
----
-
-## 8. Acceptance Criteria
-
-- [ ] `pytest tests/` passes with ≥ 80% coverage.
-- [ ] CI pipeline runs on every push and blocks merge on test failure.
-- [ ] JARM compliance test in CI (grep-based, blocks merge if JARM in passive modules).
-- [ ] Naming convention test blocks merge if `header_payload_ratio` found.
-- [ ] Model evaluation notebook runs end-to-end on CIC-IDS-2019 without touching training data.
-- [ ] All 7 fixture PCAPs produce the expected alert outcomes.
-- [ ] `docs/feature_dictionary.md` covers all 100+ features.
+| `src/scoring/risk_scorer.py` | Risk score computation and severity classification |
+| `src/scoring/__init__.py` | Module init and exports |

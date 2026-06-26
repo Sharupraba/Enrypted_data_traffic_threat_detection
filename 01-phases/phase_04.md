@@ -1,210 +1,264 @@
-# Phase 4: Threat Intelligence Integration
+# Phase 4 — Feature Engineering
 
-> **Duration:** 1 week  
-> **Status:** Not started  
-> **Depends on:** Phase 3 (ensemble score available)  
-> **Feeds into:** Phase 5 (Alert Engine)
+> **Position in Pipeline:** Receives structured metadata dataset from Phase 3 → Outputs ML-ready feature vector to Phase 5
+> **Purpose:** Transform raw metadata into a clean, normalized, ML-ready feature set.
 
 ---
 
-## 1. Objective
+## Overview
 
-Enrich each ML-generated detection with **external threat context** from real-world intelligence sources. This layer serves two purposes:
-1. **Increase precision:** Correlating an ML detection with external IOC confirmation dramatically reduces false positives (e.g., a Medium-confidence ML alert + VirusTotal hit → escalate to High).
-2. **Reduce analyst workload:** Providing MITRE ATT&CK TTP tags, reputation scores, and historical context directly in the alert removes the need for manual lookups.
+Phase 4 receives the structured metadata dataset from Phase 3 and prepares it for machine learning. Raw extracted features often contain missing values, different scales, and redundant information. This phase:
 
-The enrichment layer is **asynchronous and cached**. It never blocks the main detection pipeline. Enrichment happens after the initial alert is raised, and the alert is updated in-place when enrichment completes.
+1. **Handles missing values** — fills gaps left by features not available in every flow
+2. **Generates derived features** — computes ratio-based and combined signals
+3. **Scales and normalizes** — standardizes all features to compatible ranges
+4. **Selects important features** — removes noise and redundant columns
 
----
-
-## 2. Intelligence Sources
-
-### 2.1 IP Reputation
-
-| Source | Data | Rate Limit (Free) | Auth |
-|---|---|---|---|
-| AbuseIPDB | Abuse confidence %, report count, usage type | 1,000 req/day | API key |
-| VirusTotal | Detection ratio (N/72 engines), community score | 500 req/day | API key |
-| Shodan | Open ports, banners, known CVEs, hosting provider | 1 req/sec | API key |
-
-**AbuseIPDB Response Mapping:**
-```
-abuseConfidenceScore ≥ 75  → ip_reputation = 1.0 (confirmed malicious)
-abuseConfidenceScore 30–74 → ip_reputation = 0.6 (suspicious)
-abuseConfidenceScore < 30  → ip_reputation = 0.1 (likely clean)
-```
-
-**Shodan Supplemental Context:**  
-Useful for answering "Is this IP a Tor exit node?", "Is it a known VPN/proxy?", or "Does it have open RDP/SMB ports that indicate a compromised host?". This context is added to the alert metadata but does not directly modify the score.
-
-### 2.2 Domain Intelligence
-
-| Source | Data | Notes |
-|---|---|---|
-| AlienVault OTX | Domain pulses, threat categories, associated IOCs | Free API |
-| Cisco Umbrella | Domain risk score, category | Requires Umbrella subscription |
-| Quad9 | Real-time blocking signal | Query `dns.quad9.net` with the SNI domain |
-| Newly Registered Domains feeds | Domain age < 30 days | Check WhoisXML or DomainTools API |
-
-**Quad9 Integration:**  
-Instead of a REST API, Quad9 querying works as follows:
-```python
-import dns.resolver
-resolver = dns.resolver.Resolver()
-resolver.nameservers = ['9.9.9.9']
-try:
-    resolver.resolve(suspicious_domain, 'A')
-    # Quad9 resolved it → not on their blocklist
-except NXDOMAIN:
-    # Quad9 blocked it → confirmed malicious domain
-```
-
-### 2.3 TLS Intelligence
-
-| Source | Data | Update Frequency |
-|---|---|---|
-| Salesforce JA3 DB | Known malicious JA3 hashes | Updated irregularly — sync weekly |
-| ja3er.com | Community JA3 submissions | Daily sync |
-| JARM (Active) | Server fingerprinting | **On-demand analyst probe only** (see §2.3.1) |
-| crt.sh | Certificate transparency history | REST: `https://crt.sh/?q=<domain>&output=json` |
-
-#### 2.3.1 JARM — Active Investigation Module
-
-> **JARM is not a passive feature.** It requires sending 10 crafted TLS ClientHello packets to the target server and analyzing the ServerHello responses. This cannot be computed from captured traffic — it requires **active outbound connections** from the sensor.
-
-**Architecture:** JARM lives exclusively in `src/threat_intel/jarm_probe.py` and is triggered **manually by an analyst** from the Flow Inspector dashboard. When an analyst clicks "Probe with JARM" on a suspicious destination IP:
-
-1. The backend sends 10 crafted TLS ClientHellos to the destination IP.
-2. The JARM hash is computed from the ServerHello responses.
-3. The hash is looked up against the JARM database.
-4. The result is appended to the alert as an investigation note.
-
-**Security consideration:** Active JARM probing reveals that your sensor is investigating the destination. Use only when the analyst is comfortable with this disclosure. This option is **disabled by default** and requires admin role to enable.
+The output is a clean, fixed-dimension feature vector ready for the Random Forest classifier in Phase 5.
 
 ---
 
-## 3. Enrichment Pipeline Architecture
+## Architecture
 
 ```
-Detection Alert Created (ensemble score computed)
-          ↓
-[Alert Engine]  →  Publish to Redis Stream: "enrichment:queue"
-                                   ↓
-                      [Enrichment Worker] (async, separate process)
-                        ├── extract src_ip, dst_ip, sni, ja3_hash from alert
-                        │
-                        ├── CHECK Redis cache: f"enrich:{ip}:{type}"
-                        │    ├── CACHE HIT  → return cached result immediately
-                        │    └── CACHE MISS → call external API
-                        │
-                        ├── Async API calls (in parallel, max 3s timeout):
-                        │    ├── AbuseIPDB(dst_ip)
-                        │    ├── VirusTotal(dst_ip or sni)
-                        │    └── OTX(sni or ja3_hash)
-                        │
-                        ├── Store results in Redis (TTL: 1 hour)
-                        │
-                        ├── MITRE ATT&CK Tagging
-                        │
-                        └── UPDATE alert in PostgreSQL with enrichment data
-```
-
-**Timeout policy:** If all API calls do not complete within 3 seconds, the alert is stored with `enrichment_status: "pending"` and enrichment continues in the background. The alert is written to the dashboard immediately without waiting.
-
-**Rate limit management:**
-- A Redis token bucket enforces per-API rate limits.
-- AbuseIPDB: 1,000 req/day → ~0.7 req/min → enforce 1 req/min hard cap.
-- If a burst of alerts hits the same destination IP, all subsequent alerts get the cached result — the API is called only once per IP per TTL window.
-
----
-
-## 4. Redis Cache Design
-
-```
-Key format:    enrich:{lookup_type}:{value}
-Example:       enrich:ip:185.220.101.1
-               enrich:domain:malware.example.com
-               enrich:ja3:e7d705a3286e19ea42f587b344ee6865
-
-TTL:  3600 seconds (1 hour) for negative results
-      86400 seconds (24 hours) for confirmed malicious (positive) results
-      Positive results are cached longer because malicious infrastructure rarely flips clean within 24h.
-
-Value format:
-{
-    "ip_reputation": 0.92,
-    "abuse_confidence": 87,
-    "vt_malicious": 12,
-    "vt_total": 72,
-    "shodan_tags": ["proxy", "vpn"],
-    "otx_pulses": 3,
-    "domain_risk": 0.85,
-    "is_newly_registered": true,
-    "quad9_blocked": true,
-    "enriched_at": "2026-07-01T12:00:00Z"
-}
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 4 — FEATURE ENGINEERING                                   │
+│                                                                  │
+│  INPUT: Structured Metadata Dataset (from Phase 3)               │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  Step 1: Missing Value Handling                         │    │
+│  │  SimpleImputer — median for numerical, 0 for flags      │    │
+│  └──────────────────────────────┬──────────────────────────┘    │
+│                                 │                                │
+│  ┌──────────────────────────────▼──────────────────────────┐    │
+│  │  Step 2: Derived Feature Generation                     │    │
+│  │  Upload Ratio | Download Ratio | Packet Rate            │    │
+│  │  Flow Symmetry | Byte Ratio | Header Ratio              │    │
+│  └──────────────────────────────┬──────────────────────────┘    │
+│                                 │                                │
+│  ┌──────────────────────────────▼──────────────────────────┐    │
+│  │  Step 3: Feature Scaling                                │    │
+│  │  StandardScaler (mean=0, std=1)                         │    │
+│  └──────────────────────────────┬──────────────────────────┘    │
+│                                 │                                │
+│  ┌──────────────────────────────▼──────────────────────────┐    │
+│  │  Step 4: Normalization                                  │    │
+│  │  MinMaxScaler → [0, 1] bounds                           │    │
+│  └──────────────────────────────┬──────────────────────────┘    │
+│                                 │                                │
+│  ┌──────────────────────────────▼──────────────────────────┐    │
+│  │  Step 5: Feature Selection                              │    │
+│  │  SelectKBest / Random Forest Feature Importance         │    │
+│  │  Remove low-variance and low-importance features        │    │
+│  └──────────────────────────────┬──────────────────────────┘    │
+│                                 │                                │
+│  OUTPUT: ML Feature Vector (60–80 features per flow)            │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 5. MITRE ATT&CK Mapping
+## Step 1 — Missing Value Handling
 
-The `mitre_mapper.py` module maps internal threat categories to MITRE ATT&CK techniques using a static rules-based mapping (no ML). The STIX bundle is downloaded from `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` and stored locally.
+> Source: `src/engineering/preprocessor.py`
 
-| Internal Category | ATT&CK Technique | Technique ID |
-|---|---|---|
-| C2_BEACONING | Application Layer Protocol: Web Protocols | T1071.001 |
-| DNS_TUNNELING | Application Layer Protocol: DNS | T1071.004 |
-| PROTOCOL_TUNNELING | Protocol Tunneling | T1572 |
-| DATA_EXFILTRATION | Exfiltration Over C2 Channel | T1041 |
-| PORT_SCAN | Network Service Discovery | T1046 |
-| LATERAL_MOVEMENT | Lateral Tool Transfer | T1570 |
-| MALWARE_STAGING | Ingress Tool Transfer | T1105 |
-| TLS_MALWARE | Encrypted Channel | T1573 |
-| DGA_MALWARE | Domain Generation Algorithms | T1568.002 |
+Not all features are available in every flow. For example:
+- TLS features are null for non-TLS flows (plain HTTP, DNS)
+- DNS features are null for non-DNS flows
+- `burst_count` is 0 for very short flows
 
-**Multi-technique alerts:** A single flow can match multiple techniques. Example: a C2 beacon using DGA domains gets tagged `[T1071.001, T1568.002]`.
-
----
-
-## 6. Alert Score Escalation
-
-External enrichment can **upgrade** (but not downgrade) an alert's severity:
-
-| Condition | Score Modifier |
+| Feature Group | Missing Value Strategy |
 |---|---|
-| AbuseIPDB confidence ≥ 75 | +15 |
-| VirusTotal malicious detections ≥ 5/72 | +10 |
-| Quad9 blocked domain | +20 |
-| Domain registered < 30 days | +5 |
-| Shodan tagged as Tor exit node | +25 |
-| OTX pulse match | +10 |
+| Numerical flow features | Fill with **column median** |
+| TCP flag counts | Fill with **0** |
+| TLS features | Fill with **-1** (indicates "not a TLS flow") |
+| DNS features | Fill with **0** or empty string |
+| Boolean flags | Fill with **False / 0** |
 
-Score modifiers are additive and capped at 100. The modified score is stored as `final_score_enriched` alongside the original `final_score_ml`.
+**Implementation:**
+```python
+from sklearn.impute import SimpleImputer
+
+imputer_numerical = SimpleImputer(strategy='median')
+imputer_flags     = SimpleImputer(strategy='constant', fill_value=0)
+imputer_tls       = SimpleImputer(strategy='constant', fill_value=-1)
+```
 
 ---
 
-## 7. Deliverables
+## Step 2 — Derived Feature Generation
+
+> Source: `src/engineering/derived_features.py`
+
+Derived features combine raw extracted values to produce higher-signal ratios and patterns. These are computed **before** scaling.
+
+| Derived Feature | Formula | Interpretation |
+|---|---|---|
+| `upload_ratio` | `bytes_sent / (bytes_sent + bytes_received)` | Upload-heavy traffic (exfiltration signal) |
+| `download_ratio` | `bytes_received / (bytes_sent + bytes_received)` | Download-heavy traffic |
+| `packet_rate` | `total_packets / flow_duration` | Overall packet throughput |
+| `fwd_packet_rate` | `total_fwd_packets / flow_duration` | Forward packet frequency |
+| `bwd_packet_rate` | `total_bwd_packets / flow_duration` | Backward packet frequency |
+| `flow_symmetry` | `1 - abs(fwd_pkts - bwd_pkts) / total_pkts` | 1.0 = symmetric, 0.0 = one-directional |
+| `byte_ratio` | `bytes_sent / (bytes_received + 1)` | Upload vs download ratio |
+| `header_ratio` | `header_bytes / total_bytes` | Header overhead vs payload size |
+| `pkt_size_cv` | `std(pkt_sizes) / mean(pkt_sizes)` | Coefficient of variation (C2 = very low) |
+| `iat_cv` | `iat_std / (iat_mean + 1)` | IAT variability (beacon = very low) |
+
+**Edge case handling:**
+- Division by zero protected with `+ 1` or `np.where(denominator == 0, 0, ...)` patterns
+- Infinite values clipped to feature-appropriate maximum
+
+---
+
+## Step 3 — Feature Scaling
+
+> Source: `src/engineering/preprocessor.py`
+
+`StandardScaler` transforms each numerical feature to have **mean = 0** and **standard deviation = 1**.
+
+```
+z = (x - mean) / std
+```
+
+Applied to:
+- All flow statistics (duration, bytes, packets, rates)
+- All timing features (IAT mean, std, min, max)
+- All derived ratio features
+
+**Not applied to:**
+- Binary/boolean flags (already in {0, 1})
+- String-encoded categorical features (encoded separately)
+
+---
+
+## Step 4 — Normalization
+
+> Source: `src/engineering/preprocessor.py`
+
+`MinMaxScaler` bounds all features to the **[0, 1]** range:
+
+```
+x_scaled = (x - x_min) / (x_max - x_min)
+```
+
+Applied after StandardScaler to ensure compatibility with any threshold-based or probability-based models.
+
+---
+
+## Step 5 — Feature Selection
+
+> Source: `src/engineering/feature_pipeline.py`
+
+Removes features that do not contribute to classification. Two methods are used:
+
+### Method A — Variance Threshold
+Removes features with near-zero variance (constant or near-constant features).
+```python
+from sklearn.feature_selection import VarianceThreshold
+selector = VarianceThreshold(threshold=0.01)
+```
+
+### Method B — Random Forest Feature Importance
+During training, the Random Forest model (Phase 5) computes feature importance scores. Features with importance below a configurable threshold are dropped from future inference.
+
+```python
+importances = rf_model.feature_importances_
+selected_features = [f for f, imp in zip(feature_names, importances) if imp > 0.005]
+```
+
+The final selected feature list is saved to `models/selected_features.json` and reused during inference.
+
+---
+
+## Categorical Encoding
+
+Some features are strings and must be encoded before ML:
+
+| Feature | Encoding Method |
+|---|---|
+| `tls_version` | Ordinal: SSLv3=0, TLS1.0=1, TLS1.1=2, TLS1.2=3, TLS1.3=4 |
+| `protocol` | One-hot: TCP, UDP, ICMP |
+| `alpn` | One-hot: h2=0, http/1.1=1, other=2, none=-1 |
+| `cipher_is_weak` | Binary: 0 or 1 |
+| `cert_self_signed` | Binary: 0 or 1 |
+
+---
+
+## Pipeline Orchestration
+
+> Source: `src/engineering/feature_pipeline.py`
+
+The full feature engineering pipeline is implemented as a **scikit-learn Pipeline** for reproducibility:
+
+```python
+from sklearn.pipeline import Pipeline
+
+feature_pipeline = Pipeline([
+    ('imputer',      SimpleImputer(strategy='median')),
+    ('derived',      DerivedFeatureTransformer()),   # Custom transformer
+    ('scaler',       StandardScaler()),
+    ('normalizer',   MinMaxScaler()),
+    ('selector',     SelectKBest(k=70)),
+])
+```
+
+The fitted pipeline is serialized to `models/feature_pipeline.pkl` and reused during inference so that live traffic features are transformed identically to training data.
+
+---
+
+## Final Feature Vector
+
+After all steps, each flow produces a fixed-dimension feature vector of approximately **60–80 features**, ready for the Random Forest classifier.
+
+Example feature vector (simplified):
+```
+[0.73, 0.12, 0.95, 0.41, 0.08, 0.61, 0.82, 0.19, ...]
+ │     │     │     │     │     │     │     │
+ │     │     │     │     │     │     │     └── feature_N
+ │     │     │     │     │     │     └──────── iat_cv
+ │     │     │     │     │     └────────────── flow_symmetry
+ │     │     │     │     └──────────────────── upload_ratio
+ │     │     │     └────────────────────────── iat_mean (scaled)
+ │     │     └──────────────────────────────── syn_rate
+ │     └────────────────────────────────────── bytes_per_sec (scaled)
+ └──────────────────────────────────────────── flow_duration (scaled)
+```
+
+---
+
+## Input / Output Summary
+
+| Attribute | Details |
+|---|---|
+| **INPUT** | Structured metadata dataset (~50 raw features, from Phase 3) |
+| **OUTPUT** | ML feature vector (60–80 normalized features) |
+
+---
+
+## Technologies
+
+| Component | Technology | Notes |
+|---|---|---|
+| Missing value imputation | `scikit-learn SimpleImputer` | Median / constant strategies |
+| Feature scaling | `scikit-learn StandardScaler` | Zero-mean, unit-variance |
+| Normalization | `scikit-learn MinMaxScaler` | [0, 1] range |
+| Feature selection | `scikit-learn SelectKBest` | Information gain scoring |
+| Derived features | Custom Python transformer | Ratio and combined features |
+| Pipeline management | `scikit-learn Pipeline` | Reproducible fit/transform |
+| Model persistence | `joblib` | Save/load fitted pipeline |
+| Data manipulation | `pandas`, `numpy` | DataFrame and array operations |
+
+---
+
+## Deliverables
 
 | File | Description |
 |---|---|
-| `src/threat_intel/ip_reputation.py` | AbuseIPDB, VirusTotal, Shodan clients |
-| `src/threat_intel/domain_intel.py` | OTX, Umbrella, Quad9, domain age clients |
-| `src/threat_intel/ja3_lookup.py` | Salesforce/ja3er hash database sync + lookup |
-| `src/threat_intel/jarm_probe.py` | Active JARM probing module (analyst-triggered) |
-| `src/threat_intel/cert_inspector.py` | crt.sh certificate history lookup |
-| `src/threat_intel/intel_cache.py` | Redis cache manager with TTL logic |
-| `src/threat_intel/enrichment_worker.py` | Async enrichment pipeline worker |
-| `src/detection/mitre_mapper.py` | Static ATT&CK TTP tagging rules |
-
----
-
-## 8. Acceptance Criteria
-
-- [ ] JARM probe is accessible ONLY via `jarm_probe.py`, completely absent from passive capture or feature modules.
-- [ ] Enrichment completes within 3 seconds for cached results.
-- [ ] AbuseIPDB rate limiting enforced (max 1 req/min) and verified by test.
-- [ ] Alert written to DB immediately; enrichment updated async — confirmed by integration test.
-- [ ] MITRE tags present in 100% of alerts (at minimum, tags derived from internal category).
-- [ ] Positive cache TTL (24h) vs negative TTL (1h) verified.
-- [ ] Redis keys follow the defined `enrich:{type}:{value}` format.
+| `src/engineering/preprocessor.py` | Imputer, scaler, normalizer setup and fit/transform |
+| `src/engineering/derived_features.py` | Derived feature computation transformer |
+| `src/engineering/feature_pipeline.py` | End-to-end scikit-learn Pipeline assembly |
+| `src/engineering/__init__.py` | Module init and exports |
+| `models/feature_pipeline.pkl` | Serialized fitted pipeline (produced during training) |
+| `models/selected_features.json` | List of selected feature names |

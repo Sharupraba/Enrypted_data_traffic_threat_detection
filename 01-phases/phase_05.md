@@ -1,327 +1,294 @@
-# Phase 5: Alert Engine & Dashboard
+# Phase 5 — Machine Learning Detection
 
-> **Duration:** 2 weeks  
-> **Status:** Not started  
-> **Depends on:** Phase 3 (ensemble score), Phase 4 (enriched alert)  
-> **Feeds into:** Phase 6 (Storage), Phase 8 (Retraining — analyst feedback)
+> **Position in Pipeline:** Receives ML feature vector from Phase 4 → Outputs threat prediction + confidence score to Phase 6
+> **Purpose:** Primary threat detection. Classify each network flow as Threat or Normal.
 
 ---
 
-## 1. Objective
+## Overview
 
-Translate enriched ML detections into actionable, analyst-ready security alerts with minimal noise. Build a real-time, high-fidelity dashboard that accelerates investigation and reduces time-to-response.
+Phase 5 is the **core detection engine** of the system. It applies a trained **Random Forest classifier** to each incoming feature vector and produces:
+- A **classification label**: `Threat` or `Normal`
+- A **confidence score**: probability from 0.0 to 1.0 (displayed as %)
+- **Feature importance**: which features contributed most to the prediction (for explainability)
 
-The alert engine must solve two competing problems:
-1. **Sensitivity:** Don't miss real threats.
-2. **Specificity:** Don't flood analysts with false positives (alert fatigue kills security operations).
+This is the only component that produces threat detections. All downstream phases (6, 7) build upon this prediction — they do not generate new detections.
 
 ---
 
-## 2. Alert Engine
-
-### 2.1 Severity Classification
-
-Final score → severity tier mapping:
-
-| Score Range | Severity | Response Target | Color |
-|---|---|---|---|
-| 80 – 100 | CRITICAL | Immediate (< 15 min) | 🔴 Red |
-| 60 – 79 | HIGH | Same session (< 1 hr) | 🟠 Orange |
-| 40 – 59 | MEDIUM | Same day | 🟡 Yellow |
-| 20 – 39 | LOW | Weekly review | 🔵 Blue |
-| 0 – 19 | INFO | No action / logging only | ⚪ Gray |
-
-### 2.2 Deduplication — Tiered by Severity
-
-> **The 5-minute dedup window is too short for slow attacks.** A single dedup window suppresses fast-attack alert storms but misses slow attacks that deliberately operate across hours. Replace with severity-tiered dedup.
-
-| Severity | Dedup Window | Rationale |
-|---|---|---|
-| CRITICAL / HIGH | 5 minutes | Fast attacks; alert every 5 min if still active |
-| MEDIUM | 1 hour | Slow scans / low-rate exfil; suppress redundant alerts |
-| LOW / INFO | 24 hours | Background noise; one daily summary |
-
-**Dedup key:** `hash(src_ip, dst_ip, alert_category)` — intentionally excludes port and timestamp so recurring beaconing to the same destination is deduplicated correctly.
-
-**Implementation:**
-```python
-dedup_ttl = {
-    "CRITICAL": 300,    # 5 minutes
-    "HIGH":     300,
-    "MEDIUM":   3600,   # 1 hour
-    "LOW":      86400,  # 24 hours
-    "INFO":     86400,
-}
-dedup_key = f"dedup:{hash(src_ip + dst_ip + alert_category)}"
-if redis.set(dedup_key, "1", ex=dedup_ttl[severity], nx=True):
-    emit_alert()   # First occurrence — emit
-# else: suppressed — increment dedup counter on existing alert
-```
-
-**Suppressed alert counting:** Even when an alert is suppressed by dedup, increment `dedup_count` on the original alert. This converts repeated suppressed events into a count field, preserving signal without flooding.
-
-### 2.3 Rate Limiting
-
-Global rate limiter caps total alerts per minute to prevent detection bursts from overwhelming the dashboard even when dedup fails:
+## Architecture
 
 ```
-Global:          max 100 alerts/minute
-Per source IP:   max 10 alerts/minute
-Per category:    max 20 alerts/minute per category
+┌────────────────────────────────────────────────────────────────┐
+│  PHASE 5 — MACHINE LEARNING DETECTION                           │
+│                                                                 │
+│  INPUT: ML Feature Vector (from Phase 4)                        │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              Random Forest Classifier                    │  │
+│  │                                                          │  │
+│  │  n_estimators : 200 trees                                │  │
+│  │  max_depth    : None (fully grown)                       │  │
+│  │  class_weight : balanced                                 │  │
+│  │  criterion    : gini                                     │  │
+│  │                                                          │  │
+│  │  Input:  [feature_vector]                                │  │
+│  │  Output: class_label + predict_proba                     │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  SHAP Explainer (post-prediction)                        │  │
+│  │                                                          │  │
+│  │  Computes contribution of each feature                   │  │
+│  │  Returns top-5 features driving the prediction           │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  OUTPUT:                                                        │
+│  ┌───────────────────────────────┐                             │
+│  │  classification : "THREAT"    │                             │
+│  │  confidence     : 93%         │                             │
+│  │  top_features   : [...]       │                             │
+│  └───────────────────────────────┘                             │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-When rate limit is hit, a "Rate limit summary" meta-alert is emitted: "Suppressed N alerts from src_ip X in the last 60 seconds."
+---
 
-### 2.4 Allow-List (Alert-Level)
+## Model: Random Forest Classifier
 
-The primary allow-list is at the **capture layer** (Phase 1). This allow-list handles cases where an allow-listed host still generates valid flow records for non-allow-listed traffic.
+### Why Random Forest?
 
-Alert-level allow-list entries:
-- `(src_ip, dst_ip, alert_category)` tuples — suppress this specific combination.
-- Per-JA3-hash suppression — for known-safe internal tools with distinctive JA3 signatures.
-- Time-scoped entries — e.g., suppress alerts from a specific IP during a maintenance window.
-
-### 2.5 Alert Schema
-
-```json
-{
-    "alert_id":           "uuid4",
-    "created_at":         "ISO8601",
-    "updated_at":         "ISO8601",
-    "status":             "open | acknowledged | false_positive | true_positive | closed",
-
-    "severity":           "CRITICAL | HIGH | MEDIUM | LOW | INFO",
-    "final_score_ml":     82.4,
-    "final_score_enriched": 92.4,
-
-    "alert_category":     "C2_BEACONING",
-    "mitre_ttps":         ["T1071.001", "T1568.002"],
-
-    "src_ip":             "10.0.0.42",
-    "dst_ip":             "185.220.101.1",
-    "src_port":           52341,
-    "dst_port":           443,
-    "protocol":           6,
-    "flow_duration":      118.4,
-    "sni":                "api.totally-not-malware.io",
-    "ja3_hash":           "e7d705a3286e19ea42f587b344ee6865",
-    "ja3s_hash":          "f4febc55ea12b31ae17cfb7e614afda1",
-
-    "model_scores": {
-        "isolation_forest": 0.72,
-        "autoencoder":      0.81,
-        "xgboost":          0.89,
-        "cnn":              0.74,
-        "lstm":             0.93,
-        "ja3_match":        0.80,
-        "dns_risk":         0.45
-    },
-
-    "shap_explanation": [
-        {"feature": "iat_autocorrelation",  "value": 0.94, "contribution": "+42.3"},
-        {"feature": "ja3_match_score",      "value": 1.0,  "contribution": "+18.1"},
-        {"feature": "sni_label_entropy",    "value": 4.1,  "contribution": "+12.7"},
-        {"feature": "fwd_pkt_len_cv",       "value": 0.02, "contribution": "+8.4"},
-        {"feature": "cert_is_short_lived",  "value": 1,    "contribution": "+5.2"}
-    ],
-    "human_readable": "Traffic is highly periodic (beacon every ~62s), uses a known malicious TLS fingerprint, and connects to a high-entropy domain registered 3 days ago.",
-
-    "enrichment": {
-        "status": "complete | pending | failed",
-        "ip_reputation": 0.92,
-        "abuse_confidence": 87,
-        "vt_malicious": 12,
-        "vt_total": 72,
-        "quad9_blocked": true,
-        "domain_age_days": 3,
-        "shodan_tags": ["tor-exit"]
-    },
-
-    "analyst_feedback": {
-        "verdict": null,
-        "analyst_id": null,
-        "notes": null,
-        "feedback_at": null
-    },
-
-    "dedup_count": 0,
-    "dedup_key": "sha256:..."
-}
-```
-
-### 2.6 Output Formats
-
-| Format | Use Case |
+| Reason | Explanation |
 |---|---|
-| **JSON** | API responses, WebSocket streaming, internal storage |
-| **CEF** | ArcSight SIEM integration |
-| **Syslog (RFC 5424)** | Generic SIEM / log aggregator (Splunk, ELK) |
-| **Webhook** | Push to Slack, PagerDuty, JIRA on HIGH/CRITICAL |
+| **High accuracy on tabular data** | Flow metadata is tabular — RF consistently achieves high F1 on traffic datasets |
+| **Handles class imbalance** | `class_weight='balanced'` adjusts for more benign flows than malicious |
+| **No feature scaling required** | Decision trees are scale-invariant (Phase 4 scaling is still good practice) |
+| **Feature importance built-in** | Naturally provides feature contribution scores per prediction |
+| **Fast inference** | Sub-millisecond prediction for a single feature vector |
+| **No black box** | Interpretable — each tree path can be explained |
+| **Robust to noise** | Ensemble of 200 trees reduces overfitting from individual noisy features |
+
+### Model Hyperparameters
+
+| Parameter | Value | Reason |
+|---|---|---|
+| `n_estimators` | 200 | Balance between accuracy and speed |
+| `max_features` | `sqrt(n_features)` | Default RF setting — reduces correlation between trees |
+| `max_depth` | None | Fully grown trees for maximum accuracy |
+| `min_samples_split` | 5 | Avoid overfitting on tiny leaf nodes |
+| `class_weight` | `balanced` | Accounts for class imbalance in training data |
+| `random_state` | 42 | Reproducibility |
+| `n_jobs` | -1 | Use all CPU cores for training |
 
 ---
 
-## 3. FastAPI Backend
+## Training
 
-### 3.1 REST API Routes
+### Training Datasets
+
+| Dataset | Threat Classes | Benign Source |
+|---|---|---|
+| CICIDS 2017 | DDoS, PortScan, BotNet, Infiltration | Normal enterprise traffic |
+| CIC-IDS 2018 | Brute Force, Web Attacks, DoS | Normal enterprise traffic |
+| CIC-IDS 2019 | Encrypted malicious flows (TLS-specific) | Normal HTTPS traffic |
+| UNSW-NB15 | Fuzzers, Backdoors, Exploits | Normal enterprise traffic |
+| CTU-13 | Botnet C2, P2P encrypted malware | Normal ISP traffic |
+
+### Training Procedure
 
 ```
-GET  /api/v1/alerts           → Paginated alert list (filter by severity, category, time)
-GET  /api/v1/alerts/{id}      → Single alert with full details + SHAP
-POST /api/v1/alerts/{id}/feedback → Analyst verdict (true/false positive)
-PUT  /api/v1/alerts/{id}/status   → Change status (ack, close, escalate)
-
-GET  /api/v1/flows            → Query flows (filter by IP, port, time, score)
-GET  /api/v1/flows/{id}       → Single flow full feature vector
-POST /api/v1/flows/upload     → Upload PCAP for offline analysis
-
-POST /api/v1/capture/start    → Start live capture (Linux only)
-POST /api/v1/capture/stop     → Stop live capture
-
-GET  /api/v1/models           → List loaded models + versions
-POST /api/v1/models/thresholds → Update ensemble score thresholds
-
-GET  /api/v1/allowlist        → List current allow-list entries
-POST /api/v1/allowlist        → Add entry
-DELETE /api/v1/allowlist/{id} → Remove entry
-
-GET  /api/v1/stats            → Dashboard stats (flows/min, alerts/min, top threats)
-WS   /ws/alerts               → WebSocket: real-time alert stream
-WS   /ws/traffic              → WebSocket: real-time flow rate stream
+1. Load raw dataset CSV / Parquet files
+2. Apply Phase 4 feature pipeline (impute → derive → scale → select)
+   (Fit the pipeline on training data only — do NOT use test data)
+3. Split: 80% train, 20% test (stratified by class label)
+4. Train Random Forest on training set
+5. Evaluate on test set (F1, ROC-AUC, confusion matrix)
+6. If targets met → serialize model to models/random_forest.pkl
+7. Serialize fitted feature pipeline to models/feature_pipeline.pkl
 ```
 
-### 3.2 WebSocket Protocol
+### Training Targets
 
-```json
-// Alert stream message (WS /ws/alerts)
-{
-    "type": "alert",
-    "data": { ... alert schema ... }
-}
+| Metric | Target | Notes |
+|---|---|---|
+| Weighted F1-Score | ≥ 0.90 | Overall multi-class performance |
+| ROC-AUC | ≥ 0.95 | Binary: threat vs normal |
+| False Positive Rate | ≤ 5% | On benign-only traffic |
+| Inference latency | < 50 ms | Per single flow |
 
-// Traffic stats message (WS /ws/traffic)
-{
-    "type": "traffic_stats",
-    "data": {
-        "flows_per_sec": 142,
-        "bytes_per_sec": 18432000,
-        "active_flows": 3821,
-        "alerts_last_minute": 7,
-        "top_src_ips": [...]
+---
+
+## Inference
+
+### Inference Process
+
+```python
+# Load model and pipeline at startup
+rf_model        = joblib.load('models/random_forest.pkl')
+feature_pipeline = joblib.load('models/feature_pipeline.pkl')
+
+def detect(raw_features: dict) -> dict:
+    # Step 1: Apply feature pipeline (transform only, not fit)
+    feature_vector = feature_pipeline.transform(pd.DataFrame([raw_features]))
+
+    # Step 2: Predict class
+    prediction = rf_model.predict(feature_vector)[0]          # "THREAT" or "NORMAL"
+
+    # Step 3: Get confidence score
+    confidence = rf_model.predict_proba(feature_vector)[0][1] # Probability of THREAT class
+
+    # Step 4: Get SHAP explanation
+    top_features = explain(feature_vector)
+
+    return {
+        "classification": prediction,
+        "confidence":     round(confidence * 100, 1),
+        "top_features":   top_features
     }
-}
+```
 
-// System message
+### Example Output
+
+```
 {
-    "type": "system",
-    "data": {"message": "Learning mode active. 5 days remaining."}
+  "classification": "THREAT",
+  "confidence":     93.2,
+  "top_features": [
+    {"feature": "iat_cv",         "value": 0.02, "importance": 0.31},
+    {"feature": "upload_ratio",   "value": 0.88, "importance": 0.24},
+    {"feature": "syn_rate",       "value": 0.95, "importance": 0.19},
+    {"feature": "ja3_match",      "value": 1.00, "importance": 0.14},
+    {"feature": "flow_symmetry",  "value": 0.11, "importance": 0.09}
+  ]
 }
 ```
 
 ---
 
-## 4. Dashboard (React + Vite)
+## Explainability — SHAP
 
-### 4.1 Views
+> Source: `src/detection/explainer.py`
 
-#### Live Traffic Map
-- Real-time geolocation of active flows on a Mapbox GL world map.
-- Flows animated as arcs from src to dst country.
-- Color: 🔴 CRITICAL, 🟠 HIGH, 🟡 MEDIUM, 🔵 BENIGN.
-- Click any arc → opens Flow Inspector for that flow.
+After each prediction, SHAP (SHapley Additive exPlanations) is used to identify which features most influenced the model's decision.
 
-#### Alert Feed
-- WebSocket-driven real-time stream of incoming alerts.
-- Each alert card shows: severity badge, MITRE TTP tag, src/dst IP, score, top SHAP feature.
-- One-click escalate, acknowledge, or mark false positive.
-- Filter bar: severity, category, time range, src IP.
+**How it works:**
+- SHAP computes the marginal contribution of each feature to the final prediction
+- Positive SHAP value = feature pushed prediction toward THREAT
+- Negative SHAP value = feature pushed prediction toward NORMAL
 
-#### Flow Inspector
-- Shows all 100+ feature values for a selected flow.
-- SHAP waterfall chart: features sorted by contribution.
-- `human_readable` explanation in a callout box.
-- "Probe with JARM" button (analyst-initiated active investigation, admin only).
-- Full packet timeline (IAT visualization) for the flow.
+**Use in the system:**
+- Top 5 features surfaced in the threat alert shown in the dashboard
+- Enables analysts to understand why a flow was flagged
+- Displayed in the Flow Details panel
 
-#### Host Risk Score
-- Top 20 hosts by rolling risk score (last 15-min / 1-hour window).
-- Per-host sparkline of risk score over time.
-- Click host → filter Alert Feed and Flow Inspector to that src_ip.
+```python
+import shap
 
-#### JA3 Explorer
-- Search by JA3 hash → see all flows in the database using that fingerprint.
-- Shows whether the hash is in the known-malicious database.
-- Timeline of when this fingerprint first appeared on the network.
+explainer = shap.TreeExplainer(rf_model)
 
-#### TLS Certificate View
-- Table of all certificates seen in TLS traffic, flagged by risk:
-  - Self-signed, expired, domain mismatch, short-lived, unknown CA, mTLS detected.
-- Click certificate → see all flows using that cert.
-
-#### Threat Timeline
-- Heatmap: alert volume over time (X = time, Y = threat category).
-- Filterable by day/week/month.
-- Overlays Learning Mode period (grayed out — no alerts generated during baseline).
-
-#### Detection Tuning
-- **Per-model weight sliders:** Adjust `w1`–`w7` in the ensemble formula.
-- **Threshold sliders:** Adjust CRITICAL/HIGH/MEDIUM/LOW score cutoffs.
-- **Dedup window overrides:** Override tiered dedup windows per category.
-- **Allow-list manager:** Add/remove/search allow-list entries (IP/CIDR/domain/JA3).
-- **Learning Mode toggle:** Manually enter/exit baseline learning mode.
-
-### 4.2 Learning Mode Banner
-
-During the 7-day bootstrap period (Phase 2, §2.7):
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  ⏱ LEARNING MODE ACTIVE — Building traffic baseline.               │
-│  Alerts are suppressed. Baseline complete in: 5 days, 14 hours.     │
-│                          [Exit Learning Mode Early]                 │
-└─────────────────────────────────────────────────────────────────────┘
+def explain(feature_vector: np.ndarray) -> list[dict]:
+    shap_values = explainer.shap_values(feature_vector)
+    # shap_values[1] = contribution toward THREAT class
+    top_indices = np.argsort(np.abs(shap_values[1][0]))[::-1][:5]
+    return [
+        {
+            "feature":    feature_names[i],
+            "value":      float(feature_vector[0][i]),
+            "importance": float(abs(shap_values[1][0][i]))
+        }
+        for i in top_indices
+    ]
 ```
 
 ---
 
-## 5. Analyst Feedback Loop (Critical for Phase 8)
+## Threat Classes Detected
 
-Every alert must be actionable for the analyst **and** feed back into model improvement:
-
-```
-Alert displayed → Analyst reviews → Marks verdict:
-  [✓ True Positive]  → Confirm threat: flow added to retraining corpus (positive class)
-  [✗ False Positive] → Mark FP: flow added to retraining corpus (benign class)
-                        + Auto-suggest allow-list rule if FP rate for this IP > 3
-  [? Uncertain]       → Flag for senior analyst review
-```
-
-Analyst feedback is stored in the `analyst_feedback` block of the alert schema and in a dedicated `analyst_feedback` table in PostgreSQL. The Phase 8 retraining pipeline subscribes to this table.
+| Threat Class | Primary Feature Signals |
+|---|---|
+| **C2 Beaconing** | Low IAT variance, fixed packet size, high IAT autocorrelation |
+| **Port Scanning** | High SYN rate, low bytes/flow, many unique destination ports |
+| **Data Exfiltration** | High upload ratio, large byte volume, off-hours timing |
+| **DDoS / SYN Flood** | Very high SYN count, low FIN/ACK count, asymmetric packets |
+| **TLS Malware** | Known-bad JA3 hash, weak cipher, self-signed certificate |
+| **DGA Malware** | High domain entropy, high NXDOMAIN rate |
+| **DNS Tunneling** | Very high DNS query frequency, oversized DNS responses |
+| **Protocol Tunneling** | Port/protocol mismatch, suspicious ALPN, unusual packet sizes |
 
 ---
 
-## 6. Deliverables
+## Model Persistence
+
+| File | Contents |
+|---|---|
+| `models/random_forest.pkl` | Trained Random Forest model |
+| `models/feature_pipeline.pkl` | Fitted feature engineering pipeline |
+| `models/selected_features.json` | List of selected feature names |
+| `models/class_labels.json` | Class index → label mapping |
+| `models/training_metrics.json` | F1, ROC-AUC, confusion matrix from training run |
+
+---
+
+## Trainer
+
+> Source: `src/detection/trainer.py`
+
+The trainer script is run offline (not during live detection) to produce and evaluate the model.
+
+```
+python -m src.detection.trainer \
+  --dataset data/datasets/cicids2017 \
+  --output  models/ \
+  --eval-report reports/training_report.json
+```
+
+---
+
+## ML Analytics (for Dashboard)
+
+The following metrics are pre-computed during training and served to the ML Analytics dashboard panel:
+
+| Metric | Format |
+|---|---|
+| Confusion Matrix | 2×2 matrix (TP, FP, FN, TN) |
+| ROC Curve | (fpr[], tpr[]) arrays |
+| Precision | Float |
+| Recall | Float |
+| F1 Score | Float |
+| Feature Importance | [{feature, importance}] sorted list |
+
+---
+
+## Input / Output Summary
+
+| Attribute | Details |
+|---|---|
+| **INPUT** | ML feature vector (60–80 normalized features, from Phase 4) |
+| **OUTPUT** | `classification` (Threat/Normal), `confidence` (0–100%), `top_features` (SHAP) |
+
+---
+
+## Technologies
+
+| Component | Technology | Notes |
+|---|---|---|
+| Primary ML model | `scikit-learn` RandomForestClassifier | Core detection engine |
+| Model persistence | `joblib` | .pkl serialization |
+| Explainability | `SHAP` | TreeExplainer for RF |
+| Training evaluation | `scikit-learn` metrics | F1, ROC-AUC, confusion matrix |
+| Data handling | `pandas`, `numpy` | Feature matrices |
+
+---
+
+## Deliverables
 
 | File | Description |
 |---|---|
-| `src/detection/detector.py` | Main detection orchestration |
-| `src/detection/alert_engine.py` | Alert creation, tiered dedup, rate limiting, allow-list |
-| `src/api/main.py` | FastAPI app with CORS, auth middleware |
-| `src/api/routes/capture.py` | Live capture start/stop |
-| `src/api/routes/analysis.py` | PCAP upload + batch analysis |
-| `src/api/routes/alerts.py` | Alert CRUD + analyst feedback |
-| `src/api/routes/flows.py` | Flow query + inspector |
-| `src/api/routes/models.py` | Model management + threshold tuning |
-| `src/api/websocket.py` | WebSocket live streams (alerts + traffic) |
-| `frontend/` | Full React + Vite source (8 views + auth) |
-
----
-
-## 7. Acceptance Criteria
-
-- [ ] Alert dedup: MEDIUM severity alerts for same src/dst/category not repeated within 1 hour.
-- [ ] CRITICAL alerts delivered to WebSocket within 200ms of ensemble scoring.
-- [ ] Analyst feedback (TP/FP) stored correctly in PostgreSQL.
-- [ ] Learning Mode banner visible on dashboard; no alerts generated during learning mode.
-- [ ] Allow-list suppression verified: adding a rule stops alerts for that flow within 10 seconds.
-- [ ] JARM probe button available only to admin role users.
-- [ ] CEF output validated against ArcSight CEF spec.
-- [ ] Rate limit (100 alerts/min global) enforced and tested.
+| `src/detection/model.py` | Random Forest wrapper (load, predict, predict_proba) |
+| `src/detection/trainer.py` | Offline training script |
+| `src/detection/explainer.py` | SHAP feature importance computation |
+| `src/detection/__init__.py` | Module init and exports |
+| `models/random_forest.pkl` | Trained model (produced by trainer) |
+| `models/feature_pipeline.pkl` | Fitted pipeline (produced by trainer) |
+| `notebooks/03_model_training.ipynb` | Interactive training and evaluation notebook |
+| `notebooks/04_model_evaluation.ipynb` | Metrics, confusion matrix, ROC curve, SHAP plots |
