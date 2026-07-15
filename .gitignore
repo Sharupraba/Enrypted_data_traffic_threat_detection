@@ -1,12 +1,12 @@
 ## Python
-#__pycache__/
-#*.py[cod]
-#*$py.class
-#venv/
-#.env
-#.pytest_cache/
-#.coverage
-#htmlcov/
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
 
 ## Node
 node_modules/
@@ -20,6 +20,7 @@ node_modules/
 
 ## Project Specific
 data/
+01-phases/
 #!data/.gitkeep
 #models/*.pkl
 #results/
