@@ -1,202 +1,256 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
-import Upload from './components/Upload';
-import ResultsSummary from './components/ResultsSummary';
-import FlowTable from './components/FlowTable';
-import TerminalLog from './components/TerminalLog';
-import CombatRadar from './components/CombatRadar';
-import { Button } from './components/ui/button';
-import { Separator } from './components/ui/separator';
 import { 
-  Shield, 
-  RefreshCcw, 
-  Github, 
-  Globe, 
-  Terminal as TerminalIcon, 
-  Zap, 
-  Database, 
-  LayoutDashboard, 
-  Search, 
-  Settings, 
-  Activity,
-  Cpu
+  Shield, Database, Cpu, Activity, LayoutDashboard, Radio, 
+  ShieldAlert, TableProperties, Search, BarChart3, FileSpreadsheet,
+  LogOut, Bell, Settings, Terminal, ShieldCheck, Info, X
 } from 'lucide-react';
+import { Separator } from './components/ui/separator';
 
-function NavButton({ children, active, onClick }) {
+import Auth from './components/Auth';
+import Overview from './components/Overview';
+import LiveTelemetry from './components/LiveTelemetry';
+import PCAPAnalysis from './components/PCAPAnalysis';
+import ThreatAlerts from './components/ThreatAlerts';
+import FlowExplorer from './components/FlowExplorer';
+import ThreatIntel from './components/ThreatIntel';
+import Analytics from './components/Analytics';
+import Reports from './components/Reports';
+
+function SideNavButton({ icon: Icon, label, active, onClick }) {
   return (
     <button 
       onClick={onClick}
       className={cn(
-        "px-4 py-1.5 rounded text-[11px] font-bold uppercase tracking-tight transition-all flex items-center gap-2",
-        active ? "text-primary bg-primary/5 shadow-[inset_0_0_10px_rgba(0,242,255,0.1)]" : "text-muted-foreground hover:text-slate-200"
+        "w-full px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-3 text-left border",
+        active 
+          ? "text-primary bg-primary/5 border-primary/20 shadow-[inset_0_0_10px_rgba(0,242,255,0.05)]" 
+          : "text-muted-foreground border-transparent hover:text-slate-200 hover:bg-white/[0.02]"
       )}
     >
-      {children}
+      <Icon className={cn("w-4 h-4 shrink-0", active ? "text-primary" : "text-muted-foreground/80")} />
+      <span>{label}</span>
     </button>
   );
 }
 
-function SideIcon({ icon: Icon, active }) {
-  return (
-    <div className={cn(
-      "w-10 h-10 rounded-lg flex items-center justify-center transition-all cursor-pointer group",
-      active ? "bg-primary text-black" : "text-muted-foreground hover:bg-white/5 hover:text-white"
-    )}>
-      <Icon className="w-5 h-5 transition-transform group-hover:scale-110" />
-    </div>
-  );
-}
-
-function StatusItem({ label, value, color }) {
-  return (
-    <div className="flex items-center justify-between text-[10px] mono">
-      <span className="text-muted-foreground">{label}</span>
-      <span className={cn("font-bold uppercase", color)}>{value}</span>
-    </div>
-  )
-}
-
 export default function App() {
-  const [results, setResults] = useState(null);
-  const [activeTab, setActiveTab] = useState('analyzer');
+  const [accessGranted, setAccessGranted] = useState(true);
+  const [apiEndpoint, setApiEndpoint] = useState('http://127.0.0.1:8000');
+  const [activeTab, setActiveTab] = useState('overview');
+  
+  // SOC data states
+  const [flows, setFlows] = useState([]);
+  const [alerts, setAlerts] = useState([]);
+  const [stats, setStats] = useState(null);
+  
+  // Real-time notifications queue
+  const [toasts, setToasts] = useState([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const socketRef = useRef(null);
 
-  const handleReset = () => setResults(null);
+  // Authenticate portal
+  const handleLoginSuccess = (endpoint) => {
+    setApiEndpoint(endpoint);
+    setAccessGranted(true);
+  };
+
+  // Sync historical and diagnostic metrics from SQLite
+  const handleSyncData = async () => {
+    try {
+      const statsRes = await fetch(`${apiEndpoint}/api/analytics/stats`);
+      const flowsRes = await fetch(`${apiEndpoint}/api/flows?limit=1000`);
+      const alertsRes = await fetch(`${apiEndpoint}/api/alerts?limit=1000`);
+
+      if (statsRes.ok) setStats(await statsRes.json());
+      if (flowsRes.ok) setFlows(await flowsRes.json());
+      if (alertsRes.ok) setAlerts(await alertsRes.json());
+    } catch (err) {
+      console.error("Data synchronization failed:", err);
+    }
+  };
+
+  // Connect WebSocket channel for real-time broadcasts
+  useEffect(() => {
+    if (!accessGranted) return;
+
+    // Initial sync
+    handleSyncData();
+
+    const wsUrl = apiEndpoint.replace('http', 'ws') + '/ws';
+    const socket = new WebSocket(wsUrl);
+    socketRef.current = socket;
+
+    socket.onopen = () => setIsConnected(true);
+    socket.onclose = () => setIsConnected(false);
+    socket.onerror = () => setIsConnected(false);
+
+    socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.event === 'new_flow') {
+          // Update local flows list
+          setFlows(prev => [msg.data, ...prev].slice(0, 1000));
+          // Refresh statistics
+          handleSyncData();
+        } else if (msg.event === 'new_alert') {
+          // Append to alerts registry
+          setAlerts(prev => [msg.data, ...prev]);
+          // Add custom animated alert toast notification
+          const toastId = Date.now();
+          setToasts(prev => [...prev, { id: toastId, ...msg.data }]);
+          // Auto-cleanup toast after 6s
+          setTimeout(() => {
+            setToasts(prev => prev.filter(t => t.id !== toastId));
+          }, 6000);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, [accessGranted, apiEndpoint]);
+
+  if (!accessGranted) {
+    return <Auth onLoginSuccess={handleLoginSuccess} />;
+  }
 
   return (
-    <div className="min-h-screen bg-[#050505] text-slate-200 flex flex-col font-sans selection:bg-primary/30 overflow-hidden">
-      <div className="scanline-overlay pointer-events-none fixed inset-0 z-[100] opacity-[0.03]" />
+    <div className="min-h-screen bg-[#050505] text-slate-200 flex flex-col font-sans selection:bg-primary/30 overflow-hidden relative">
+      {/* Visual cyber mesh overlays */}
+      <div className="scanline-overlay pointer-events-none fixed inset-0 z-[100] opacity-[0.015]" />
       
-      {/* Top Navigation */}
-      <header className="h-14 border-b border-white/5 bg-black/40 backdrop-blur-xl flex items-center justify-between px-6 z-50">
+      {/* Top SOC Navigation Bar */}
+      <header className="h-14 border-b border-white/5 bg-black/40 backdrop-blur-xl flex items-center justify-between px-6 z-50 shrink-0">
         <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2 group cursor-pointer" onClick={handleReset}>
-            <div className="bg-primary text-black p-1 rounded transition-all group-hover:scale-110 shadow-[0_0_15px_rgba(0,242,255,0.4)]">
+          <div className="flex items-center gap-2.5">
+            <div className="bg-primary text-black p-1 rounded-lg transition-transform hover:scale-105 shadow-[0_0_15px_rgba(0,242,255,0.3)]">
               <Shield className="w-5 h-5 fill-current" />
             </div>
             <div className="flex flex-col leading-none">
-              <span className="text-sm font-black tracking-tighter uppercase italic">Zenith</span>
-              <span className="text-[9px] text-primary uppercase mono font-bold tracking-[0.2em]">Signal.Engine</span>
+              <span className="text-sm font-black tracking-tighter uppercase italic text-white">Zenith SOC</span>
+              <span className="text-[8px] text-primary uppercase mono font-bold tracking-[0.25em] mt-0.5">Packet.Dissect</span>
             </div>
           </div>
-          
-          <nav className="hidden lg:flex items-center gap-1">
-            <NavButton active={activeTab === 'analyzer'} onClick={() => setActiveTab('analyzer')}>
-               <Activity className="w-3.5 h-3.5" /> Analyzer
-            </NavButton>
-            <NavButton active={activeTab === 'telemetry'} onClick={() => setActiveTab('telemetry')}>
-               <Zap className="w-3.5 h-3.5" /> Live Telemetry
-            </NavButton>
-            <NavButton active={activeTab === 'database'} onClick={() => setActiveTab('database')}>
-               <Database className="w-3.5 h-3.5" /> Threat DB
-            </NavButton>
-          </nav>
         </div>
 
+        {/* Global Connection & Info Status */}
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/10 text-[10px] mono font-bold text-muted-foreground uppercase shadow-inner">
-             <div className="flex items-center gap-1.5 animate-pulse">
-               <Cpu className="w-3 h-3 text-primary" />
-               <span>Zenith.Alpha</span>
+          <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/10 text-[9px] mono font-bold text-muted-foreground uppercase shadow-inner">
+             <div className="flex items-center gap-1.5">
+               {isConnected ? (
+                 <ShieldCheck className="w-3.5 h-3.5 text-benign animate-pulse" />
+               ) : (
+                 <ShieldAlert className="w-3.5 h-3.5 text-threat animate-pulse" />
+               )}
+               <span>{isConnected ? "SOC Pipeline Active" : "SOC Engine Offline"}</span>
              </div>
           </div>
+          <Bell className="w-4.5 h-4.5 text-muted-foreground hover:text-white cursor-pointer transition-colors" />
+          <Settings className="w-4.5 h-4.5 text-muted-foreground hover:text-white cursor-pointer transition-colors" />
+          <Separator orientation="vertical" className="h-5 bg-white/10" />
+          <button 
+            onClick={() => setAccessGranted(false)}
+            className="p-1 rounded hover:bg-white/5 text-muted-foreground hover:text-threat transition-all"
+            title="Log Out"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
+      {/* Workspace Panel */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar Mini */}
-        <aside className="w-16 border-r border-white/5 bg-black/20 flex flex-col items-center py-6 gap-6">
-          <SideIcon icon={LayoutDashboard} active />
-          <SideIcon icon={TerminalIcon} />
+        {/* Left collapsable side menu */}
+        <aside className="w-60 border-r border-white/5 bg-black/20 flex flex-col justify-between py-6 px-4 shrink-0">
+          <div className="space-y-6">
+            <div className="text-[9px] mono uppercase font-bold text-muted-foreground/60 tracking-[0.2em] px-2">Console Navigation</div>
+            <div className="space-y-1.5">
+              <SideNavButton icon={LayoutDashboard} label="Overview Dashboard" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
+              <SideNavButton icon={Radio} label="Live Telemetry" active={activeTab === 'live'} onClick={() => setActiveTab('live')} />
+              <SideNavButton icon={Terminal} label="PCAP Analysis" active={activeTab === 'pcap'} onClick={() => setActiveTab('pcap')} />
+              <SideNavButton icon={ShieldAlert} label="Threat Alerts" active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} />
+              <SideNavButton icon={TableProperties} label="Flow Explorer" active={activeTab === 'explorer'} onClick={() => setActiveTab('explorer')} />
+              <SideNavButton icon={Search} label="Threat Intel Search" active={activeTab === 'intel'} onClick={() => setActiveTab('intel')} />
+              <SideNavButton icon={BarChart3} label="Model Analytics" active={activeTab === 'analytics'} onClick={() => setActiveTab('analytics')} />
+              <SideNavButton icon={FileSpreadsheet} label="Reporting panel" active={activeTab === 'reports'} onClick={() => setActiveTab('reports')} />
+            </div>
+          </div>
+
+          {/* Footer diagnostics widget */}
+          <div className="p-3 border border-white/5 bg-white/[0.01] rounded-xl text-[9px] mono space-y-1 text-muted-foreground">
+            <div className="flex justify-between">
+              <span>Active NIC:</span>
+              <span className="text-slate-300">eth0</span>
+            </div>
+            <div className="flex justify-between">
+              <span>DB Size:</span>
+              <span className="text-slate-300">{flows.length} rows</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Sync Rate:</span>
+              <span className="text-benign">Stable</span>
+            </div>
+          </div>
         </aside>
 
-        {/* Main Dashboard Area */}
-        <main className="flex-1 overflow-y-auto bg-gradient-to-br from-black via-[#050505] to-[#0a0a0a] relative custom-scrollbar p-6">
-          {!results ? (
-            <div className="max-w-4xl mx-auto h-full flex flex-col items-center justify-center space-y-12 animate-in fade-in duration-700">
-               <div className="relative mb-8 text-center space-y-4">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20 text-primary text-[10px] font-bold uppercase tracking-widest animate-pulse">
-                    <Shield className="w-3 h-3" /> System Ready
-                  </div>
-                  <h1 className="text-6xl font-black tracking-tighter text-white uppercase italic leading-none drop-shadow-2xl">
-                    Deep Traffic <br/><span className="text-primary underline decoration-primary/20">Perception</span>
-                  </h1>
-                  <p className="text-muted-foreground mono text-xs uppercase tracking-[0.2em] max-w-lg mx-auto leading-relaxed">
-                    XGBoost v1.0.4 Encrypted Content Analysis Engine. Automated Threat Detection for SSL/TLS Payloads.
-                  </p>
-               </div>
-
-               <Upload onUploadSuccess={setResults} />
-               
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-3xl mt-12">
-                  <TerminalLog results={null} />
-                  <div className="border border-white/5 rounded-lg bg-card/20 p-6 flex flex-col justify-center space-y-2">
-                     <div className="text-[10px] font-black uppercase text-primary tracking-widest">Protocol Support</div>
-                     <div className="flex flex-wrap gap-2 pt-2">
-                        {['TLS 1.3', 'QUIC', 'HTTP/3', 'SSH', 'PCAP-NG'].map(p => (
-                          <span key={p} className="text-[9px] mono bg-white/5 border border-white/10 px-2 py-0.5 rounded text-muted-foreground">{p}</span>
-                        ))}
-                     </div>
-                  </div>
-               </div>
-            </div>
-          ) : (
-            <div className="max-w-[1600px] mx-auto space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-6 border-b border-white/5 pb-8">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-benign animate-pulse" />
-                    <span className="text-[10px] font-mono font-bold uppercase text-muted-foreground">Operation: Zenith-Gamma</span>
-                  </div>
-                  <h1 className="text-4xl font-black tracking-tighter text-white uppercase italic">Intercept Report</h1>
-                  <p className="text-muted-foreground mono text-[10px] uppercase font-bold">Trace ID: <span className="text-primary">{results.job_id}</span> • PCAP_BUFFER_ALLOC_OK</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Button variant="outline" onClick={handleReset} className="border-white/5 hover:bg-white/5 uppercase mono text-[10px] font-bold">
-                    <RefreshCcw className="w-3.5 h-3.5 mr-2" /> Reset Engine
-                  </Button>
-                  <Button className="bg-primary text-black hover:bg-primary/90 uppercase mono text-[10px] font-bold px-6 shadow-[0_0_20px_rgba(0,242,255,0.3)]">
-                    Export JSON
-                  </Button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-                <div className="lg:col-span-8 flex flex-col gap-6">
-                   <ResultsSummary results={results} />
-                   <div className="flex-1">
-                      <FlowTable data={results.results} />
-                   </div>
-                </div>
-                
-                <div className="lg:col-span-4 flex flex-col gap-6 min-h-full">
-                  <CombatRadar results={results} />
-                  <TerminalLog results={results} />
-                  <div className="border border-white/5 rounded-lg p-6 bg-gradient-to-br from-card/20 to-transparent space-y-4">
-                     <div className="text-[10px] font-bold uppercase text-muted-foreground tracking-widest flex items-center justify-between">
-                        <span>Engine Status</span>
-                        <span className="text-benign">99.8% Accuracy</span>
-                     </div>
-                     <Separator className="bg-white/5" />
-                     <div className="space-y-3">
-                        <StatusItem label="XGBoost Kernels" value="Active" color="text-benign" />
-                        <StatusItem label="Entropy Calib" value="Verified" color="text-benign" />
-                        <StatusItem label="Threat DB Sync" value="Local-v4" color="text-primary" />
-                     </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+        {/* Center operational view scrollable panel */}
+        <main className="flex-1 overflow-y-auto bg-gradient-to-br from-black via-[#050505] to-[#0A0A0C] relative custom-scrollbar p-6">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              transition={{ duration: 0.25 }}
+              className="h-full"
+            >
+              {activeTab === 'overview' && <Overview stats={stats} activeAlerts={alerts} />}
+              {activeTab === 'live' && <LiveTelemetry socketUrl={apiEndpoint} />}
+              {activeTab === 'pcap' && <PCAPAnalysis apiEndpoint={apiEndpoint} onResultsAvailable={handleSyncData} />}
+              {activeTab === 'alerts' && <ThreatAlerts apiEndpoint={apiEndpoint} alerts={alerts} onRefresh={handleSyncData} />}
+              {activeTab === 'explorer' && <FlowExplorer data={flows} apiEndpoint={apiEndpoint} onRefresh={handleSyncData} />}
+              {activeTab === 'intel' && <ThreatIntel apiEndpoint={apiEndpoint} />}
+              {activeTab === 'analytics' && <Analytics />}
+              {activeTab === 'reports' && <Reports apiEndpoint={apiEndpoint} />}
+            </motion.div>
+          </AnimatePresence>
         </main>
       </div>
 
-      {/* Global Command Bar (Mock) */}
-      <div className="h-8 border-t border-white/5 bg-black/60 backdrop-blur px-4 flex items-center justify-between pointer-events-none">
-        <div className="flex items-center gap-4 text-[9px] mono font-bold uppercase text-muted-foreground">
-          <div className="flex items-center gap-1.5"><Activity className="w-2.5 h-2.5" /> Running: 10452-AF</div>
-          <div className="flex items-center gap-1.5"><TerminalIcon className="w-2.5 h-2.5" /> Shell: zenith-v1</div>
-        </div>
-        <div className="text-[9px] mono text-primary">ROOT ACCESS GRANTED // READY TO INGEST</div>
+      {/* Animated Floating Alerts / Toast Queue (Framer Motion) */}
+      <div className="fixed bottom-6 right-6 z-[200] flex flex-col gap-3 w-80 pointer-events-none">
+        <AnimatePresence>
+          {toasts.map(toast => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, y: 50, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={{ type: 'spring', damping: 20 }}
+              className="p-4 border border-threat/20 bg-[#0E0707] rounded-xl flex items-start gap-3 shadow-[0_10px_30px_rgba(0,0,0,0.5)] pointer-events-auto"
+            >
+              <ShieldAlert className="w-5 h-5 text-threat shrink-0 mt-0.5 animate-bounce" />
+              <div className="flex-1 text-[10px] mono">
+                <span className="text-threat font-black uppercase tracking-wider block">Critical Threat Alert</span>
+                <p className="text-white font-medium mt-0.5 truncate">{toast.src_ip} → {toast.dst_ip}</p>
+                <div className="flex justify-between items-center mt-2 pt-1 border-t border-white/5">
+                  <span className="text-muted-foreground uppercase">Risk Index: <b>{toast.risk_score}</b></span>
+                  <button 
+                    onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+                    className="text-muted-foreground hover:text-white"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
     </div>
   );
