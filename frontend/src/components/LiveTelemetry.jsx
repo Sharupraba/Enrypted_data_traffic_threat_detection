@@ -268,9 +268,20 @@ export default function LiveTelemetry({ socketUrl }) {
                               {flow.risk_score}
                             </span>
                           </td>
-                          <td className="text-right">
-                            <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground group-hover:text-primary">
-                              <ChevronRight className="w-4 h-4" />
+                          <td className="text-right space-x-2">
+                            <Badge variant={isThreat ? 'threat' : 'secondary'} className="uppercase text-[9px] font-bold tracking-wider mr-2">
+                              {isThreat ? 'BLOCK' : 'ALLOW'}
+                            </Badge>
+                            <Button 
+                              size="sm" 
+                              variant="ghost" 
+                              className="h-7 px-2.5 text-[9px] uppercase mono border border-white/5 hover:bg-white/5 hover:text-primary"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedFlow(flow);
+                              }}
+                            >
+                              Inspect
                             </Button>
                           </td>
                         </motion.tr>

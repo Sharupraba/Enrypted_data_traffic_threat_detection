@@ -118,11 +118,24 @@ export default function FlowExplorer({ data, apiEndpoint, onRefresh }) {
     {
       id: 'actions',
       header: 'Actions',
-      cell: ({ row }) => (
-        <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-white" onClick={() => fetchFlowDetail(row.original.flow_id)}>
-          <Eye className="w-3.5 h-3.5" />
-        </Button>
-      )
+      cell: ({ row }) => {
+        const isThreat = row.original.classification === 'Threat';
+        return (
+          <div className="flex items-center gap-2">
+            <Badge variant={isThreat ? 'threat' : 'secondary'} className="uppercase text-[8px] font-bold tracking-wider scale-90">
+              {isThreat ? 'BLOCK' : 'ALLOW'}
+            </Badge>
+            <Button 
+              size="sm" 
+              variant="ghost" 
+              className="h-7 px-2 text-[9px] uppercase mono border border-white/5 hover:bg-white/5 hover:text-primary"
+              onClick={() => fetchFlowDetail(row.original.flow_id)}
+            >
+              Inspect
+            </Button>
+          </div>
+        );
+      }
     }
   ], [apiEndpoint]);
 
