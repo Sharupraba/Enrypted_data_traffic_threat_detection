@@ -190,6 +190,22 @@ class FlowBuilder:
                 
         return expired
 
+    def flush_all_flows(self) -> List[dict]:
+        """
+        Force flush all active flows currently in the flow table (e.g. at the end of PCAP parsing).
+        """
+        flushed = []
+        with self.lock:
+            keys = list(self.flow_table.keys())
+            for key in keys:
+                flushed.append(self._finalize_flow(key))
+                
+        if flushed and self.on_flow_complete:
+            for flow_dict in flushed:
+                self.on_flow_complete(flow_dict)
+                
+        return flushed
+
     def get_active_flows(self) -> List[dict]:
         with self.lock:
             return [flow.to_dict() for flow in self.flow_table.values()]
