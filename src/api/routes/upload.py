@@ -8,10 +8,10 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from src.ingestion.pcap_reader import read_pcap
 from src.parsing.flow_builder import FlowBuilder
 from src.extraction.extractor import extract_features
-from src.detection.model import detect_threat
+from src.detection.model import detect_threat_batch
 from src.enrichment.enricher import enrich_threat
 from src.scoring.risk_scorer import compute_risk_score
-from src.api.database import insert_flow
+from src.api.database import insert_flows_batch
 from src.api.websocket import manager
 
 logger = logging.getLogger("zenith.api.upload")
@@ -57,18 +57,26 @@ async def upload_pcap(file: UploadFile = File(...)):
         logger.info(f"Parsing PCAP file: {file.filename} ({bytes_read} bytes)...")
         await asyncio.to_thread(parse_pcap)
         
-        # 4. Pipeline processing for each flow
+        if not pcap_flows:
+            return {
+                "total_flows": 0,
+                "threat_count": 0,
+                "benign_count": 0,
+                "results": []
+            }
+        
+        # 4. High-speed Batch Feature Extraction & ML Detection
+        logger.info(f"Extracted {len(pcap_flows)} flows. Running batch feature extraction & ML inference...")
+        features_list = [extract_features(flow) for flow in pcap_flows]
+        batch_preds = detect_threat_batch(features_list)
+        
         results_list = []
+        scored_flows = []
         threat_count = 0
         benign_count = 0
         
-        logger.info(f"Extracted {len(pcap_flows)} flows. Running threat analysis...")
-        for flow in pcap_flows:
-            # Feature Extraction (Phase 3)
-            features = extract_features(flow)
-            
-            # ML Detection (Phase 5)
-            pred = {**features, **detect_threat(features)}
+        for idx, features in enumerate(features_list):
+            pred = {**features, **batch_preds[idx]}
             
             # Threat Intel Enrichment (Phase 6)
             enriched = await enrich_threat(pred)
@@ -82,14 +90,8 @@ async def upload_pcap(file: UploadFile = File(...)):
             scored["bytes_received"] = features.get("bytes_received", 0)
             scored["total_packets"] = features.get("total_packets", 0)
             
-            # Save to SQLite
-            await insert_flow(scored)
+            scored_flows.append(scored)
             
-            # Broadcast to UI dashboard WebSockets
-            await manager.broadcast({
-                "event": "new_flow",
-                "data": scored
-            })
             if scored.get("classification") == "Threat":
                 await manager.broadcast({
                     "event": "new_alert",
@@ -112,6 +114,9 @@ async def upload_pcap(file: UploadFile = File(...)):
                 "risk_score": scored.get("risk_score"),
                 "severity": scored.get("severity")
             })
+            
+        # High-speed batch database save
+        await insert_flows_batch(scored_flows)
             
         logger.info(f"PCAP Analysis complete. Threat count: {threat_count}")
         return {

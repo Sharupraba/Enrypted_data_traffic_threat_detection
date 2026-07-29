@@ -91,6 +91,46 @@ def insert_flow_sync(flow_dict: dict):
 async def insert_flow(flow_dict: dict):
     await asyncio.to_thread(insert_flow_sync, flow_dict)
 
+def insert_flows_batch_sync(flows_list: List[dict]):
+    if not flows_list:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("BEGIN TRANSACTION")
+    for flow_dict in flows_list:
+        cursor.execute("""
+        INSERT OR REPLACE INTO flows (
+            flow_id, src_ip, dst_ip, src_port, dst_port, protocol, timestamp, duration,
+            bytes_sent, bytes_received, total_packets, classification, confidence,
+            risk_score, severity, sni, ja3_hash, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            flow_dict.get("flow_id"),
+            flow_dict.get("src_ip"),
+            flow_dict.get("dst_ip"),
+            flow_dict.get("src_port"),
+            flow_dict.get("dst_port"),
+            flow_dict.get("protocol"),
+            flow_dict.get("timestamp"),
+            flow_dict.get("flow_duration"),
+            flow_dict.get("bytes_sent"),
+            flow_dict.get("bytes_received"),
+            flow_dict.get("total_packets"),
+            flow_dict.get("classification"),
+            flow_dict.get("confidence"),
+            flow_dict.get("risk_score"),
+            flow_dict.get("severity"),
+            flow_dict.get("sni"),
+            flow_dict.get("ja3_hash"),
+            json.dumps(flow_dict)
+        ))
+    conn.commit()
+    conn.close()
+
+async def insert_flows_batch(flows_list: List[dict]):
+    await asyncio.to_thread(insert_flows_batch_sync, flows_list)
+
 def get_flows_sync(limit: int = 1000) -> List[dict]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -163,3 +203,39 @@ def clear_database_sync():
 
 async def clear_database():
     await asyncio.to_thread(clear_database_sync)
+
+def update_flow_status_sync(flow_id: str, classification: str, severity: str, risk_score: int, attack_category: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT raw_json FROM flows WHERE flow_id = ?", (flow_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+        
+    raw_json_str = row[0]
+    new_raw_json = None
+    if raw_json_str:
+        try:
+            flow_dict = json.loads(raw_json_str)
+            flow_dict["classification"] = classification
+            flow_dict["severity"] = severity
+            flow_dict["risk_score"] = risk_score
+            flow_dict["attack_category"] = attack_category
+            new_raw_json = json.dumps(flow_dict)
+        except Exception:
+            new_raw_json = raw_json_str
+            
+    cursor.execute("""
+    UPDATE flows 
+    SET classification = ?, severity = ?, risk_score = ?, raw_json = ? 
+    WHERE flow_id = ?
+    """, (classification, severity, risk_score, new_raw_json, flow_id))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+async def update_flow_status(flow_id: str, classification: str, severity: str, risk_score: int, attack_category: str) -> bool:
+    return await asyncio.to_thread(update_flow_status_sync, flow_id, classification, severity, risk_score, attack_category)
