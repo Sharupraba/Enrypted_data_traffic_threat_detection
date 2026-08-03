@@ -62,9 +62,67 @@ def get_analytics_stats_sync() -> dict:
         "top_suspect_ips": top_suspect_ips
     }
 
+from src.enrichment.ip_reputation import check_ip_reputation
+from src.enrichment.domain_reputation import check_domain_reputation
+from src.enrichment.ja3_lookup import lookup_ja3
+
 @router.get("/analytics/stats")
 async def fetch_analytics_stats():
     """
     Fetch consolidated database stats for dashboard charting.
     """
     return await asyncio.to_thread(get_analytics_stats_sync)
+
+@router.get("/intel/lookup")
+async def threat_intel_lookup(query: str, query_type: str = "IP"):
+    """
+    Real-time Threat Intelligence lookup for IP, Domain, or JA3 hashes.
+    """
+    q_type = query_type.upper()
+    if q_type == "IP":
+        score, ok = await check_ip_reputation(query)
+        is_private = query.startswith(("192.168.", "10.", "172.16.", "127."))
+        status = "MALICIOUS" if score > 50 else ("CLEAN" if not is_private else "PRIVATE")
+        label = "High-Risk Threat Actor IP" if score > 50 else ("Clean Public Address" if not is_private else "Local Private Subnet")
+        details = f"AbuseIPDB / VirusTotal threat score: {score}%." if not is_private else "IP is inside local RFC1918 private network subnet."
+        return {
+            "query": query,
+            "type": "IP",
+            "status": status,
+            "label": label,
+            "abuse_score": score,
+            "vt_percentage": score,
+            "details": details
+        }
+    elif q_type == "DOMAIN":
+        score, ok = await check_domain_reputation(query)
+        is_malicious = score > 30
+        status = "MALICIOUS" if is_malicious else "CLEAN"
+        label = "High-Risk Malicious Host Domain (DGA / Phishing)" if is_malicious else "Standard Registered Domain Name"
+        details = f"Threat intelligence & DGA entropy risk score: {score}%. Domain exhibits characteristics associated with malware hosting or DGA fast-flux algorithms." if is_malicious else "Domain registered clean with normal character entropy."
+        return {
+            "query": query,
+            "type": "DOMAIN",
+            "status": status,
+            "label": label,
+            "vt_percentage": score,
+            "details": details
+        }
+    else:
+        ja3_res = lookup_ja3(query)
+        if ja3_res["ja3_match"]:
+            return {
+                "query": query,
+                "type": "JA3",
+                "status": "MALICIOUS",
+                "label": ja3_res["ja3_threat_label"],
+                "details": "Critical Signature Match: ClientHello fingerprinted as an active command-and-control connection tool."
+            }
+        else:
+            return {
+                "query": query,
+                "type": "JA3",
+                "status": "CLEAN",
+                "label": "Standard Web Client Signature",
+                "details": "Unknown signature. Corresponds to common web browser footprint."
+            }
