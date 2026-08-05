@@ -4,8 +4,37 @@ import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse, HTMLResponse
 from src.api.database import get_flows, get_alerts
+from src.reports.siem_exporter import generate_cef_export, generate_syslog_export
 
 router = APIRouter()
+
+@router.get("/reports/cef")
+async def export_cef():
+    """
+    Export all recorded flows into ArcSight Common Event Format (CEF) standard.
+    """
+    flows = await get_flows(limit=5000)
+    cef_content = generate_cef_export(flows)
+    stream = io.StringIO(cef_content)
+    return StreamingResponse(
+        iter([stream.getvalue()]),
+        media_type="text/plain",
+        headers={"Content-Disposition": "attachment; filename=zenith_alerts.cef"}
+    )
+
+@router.get("/reports/syslog")
+async def export_syslog():
+    """
+    Export all recorded flows into RFC 5424 Syslog standard log format.
+    """
+    flows = await get_flows(limit=5000)
+    syslog_content = generate_syslog_export(flows)
+    stream = io.StringIO(syslog_content)
+    return StreamingResponse(
+        iter([stream.getvalue()]),
+        media_type="text/plain",
+        headers={"Content-Disposition": "attachment; filename=zenith_syslog.log"}
+    )
 
 @router.get("/reports/json")
 async def export_json():
@@ -76,7 +105,7 @@ async def export_html():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Zenith Security Intelligence Report</title>
+        <title>Security Intelligence Report</title>
         <style>
             body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #333; margin: 30px; line-height: 1.6; }}
             .header {{ border-bottom: 2px solid #2A3F54; padding-bottom: 10px; margin-bottom: 20px; }}
@@ -105,8 +134,8 @@ async def export_html():
     </head>
     <body>
         <div class="header">
-            <span class="title">Zenith Threat Detection & Analysis Report</span>
-            <div class="meta">Generated automatically by Zenith Engine</div>
+            <span class="title">Threat Detection & Analysis Report</span>
+            <div class="meta">Generated automatically by Threat Detection Engine</div>
             <button onclick="window.print()" style="margin-top: 10px; padding: 8px 12px; font-weight: bold; background: #2A3F54; color: white; border: none; border-radius: 4px; cursor: pointer;">Print to PDF</button>
         </div>
 
@@ -145,15 +174,17 @@ async def export_html():
         html_content += "<tr><td colspan='7' style='text-align:center;'>No threat alerts recorded.</td></tr>"
     else:
         for a in alerts:
-            sev = a.get('severity', 'Safe').lower()
+            sev_str = str(a.get('severity') or 'Safe')
+            sev = sev_str.lower()
+            fid = str(a.get('flow_id') or 'UNKNOWN')[:8]
             html_content += f"""
                 <tr>
-                    <td><code>{a.get('flow_id', '')[:8]}...</code></td>
-                    <td>{a.get('src_ip', '')}:{a.get('src_port', '')}</td>
-                    <td>{a.get('dst_ip', '')}:{a.get('dst_port', '')}</td>
-                    <td>{a.get('protocol', '')}</td>
-                    <td>{a.get('risk_score', 0)}</td>
-                    <td><span class="badge {sev}">{sev}</span></td>
+                    <td><code>{fid}...</code></td>
+                    <td>{a.get('src_ip') or '0.0.0.0'}:{a.get('src_port') or 0}</td>
+                    <td>{a.get('dst_ip') or '0.0.0.0'}:{a.get('dst_port') or 0}</td>
+                    <td>{a.get('protocol') or 'TCP'}</td>
+                    <td>{a.get('risk_score') or 0}</td>
+                    <td><span class="badge {sev}">{sev_str}</span></td>
                     <td><code>{a.get('sni') or 'N/A'}</code></td>
                 </tr>
             """
