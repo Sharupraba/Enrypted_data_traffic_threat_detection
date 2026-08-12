@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   ShieldAlert, Shield, Search, X, ChevronRight, AlertTriangle, Eye, 
-  MapPin, Globe, Terminal, Calendar, Activity, Info
+  MapPin, Globe, Terminal, Calendar, Activity, Info, Loader2, CheckCircle2, ShieldCheck
 } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
@@ -16,6 +16,7 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
   const [selectedAlertId, setSelectedAlertId] = useState(null);
   const [alertDetails, setAlertDetails] = useState(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
+  const [allowLoading, setAllowLoading] = useState(false);
 
   // Compute severity counts
   const counts = {
@@ -49,6 +50,25 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
     }
   };
 
+  // Whitelist / Allow alert connection
+  const handleAllowAlert = async (e, flowId) => {
+    if (e) e.stopPropagation();
+    setAllowLoading(true);
+    try {
+      const response = await fetch(`${apiEndpoint}/api/flows/${flowId}/allow`, {
+        method: 'POST'
+      });
+      if (response.ok) {
+        setSelectedAlertId(null);
+        if (onRefresh) await onRefresh();
+      }
+    } catch (err) {
+      console.error("Failed to whitelist threat:", err);
+    } finally {
+      setAllowLoading(false);
+    }
+  };
+
   // Filter alerts
   const filteredAlerts = alerts.filter(a => {
     const matchesSearch = 
@@ -64,15 +84,15 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
   return (
     <div className="space-y-6 relative">
       {/* Header controls panel */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 border-b border-white/5 pb-6">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 border-b border-slate-200 pb-6">
         <div>
-          <h2 className="text-2xl font-black tracking-tight text-white uppercase italic">Active Threat Registry</h2>
-          <p className="text-[10px] text-muted-foreground uppercase mono tracking-[0.15em] mt-1">
+          <h2 className="text-xl font-bold tracking-tight text-slate-900">Active Threat Registry</h2>
+          <p className="text-xs text-slate-500 mt-1">
             Historical logs of ML-classified threat events and signatures
           </p>
         </div>
         {onRefresh && (
-          <Button onClick={onRefresh} variant="outline" className="border-white/10 hover:bg-white/5 uppercase mono text-[9px] font-bold">
+          <Button onClick={onRefresh} variant="outline" className="border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium">
             Synchronize Logs
           </Button>
         )}
@@ -82,15 +102,15 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {Object.entries(counts).map(([sev, count]) => {
           const colorClass = 
-            sev === 'Critical' ? 'text-[#FF3B30] border-[#FF3B30]/10 bg-[#FF3B30]/[0.02]' :
-            sev === 'High' ? 'text-[#FF9500] border-[#FF9500]/10 bg-[#FF9500]/[0.02]' :
-            sev === 'Medium' ? 'text-[#FFCC00] border-[#FFCC00]/10 bg-[#FFCC00]/[0.02]' :
-            'text-[#3498DB] border-[#3498DB]/10 bg-[#3498DB]/[0.02]';
+            sev === 'Critical' ? 'text-red-600 border-red-200 bg-red-50/50' :
+            sev === 'High' ? 'text-orange-600 border-orange-200 bg-orange-50/50' :
+            sev === 'Medium' ? 'text-yellow-700 border-yellow-200 bg-yellow-50/50' :
+            'text-blue-600 border-blue-200 bg-blue-50/50';
           return (
             <Card 
               key={sev}
               onClick={() => setSeverityFilter(severityFilter === sev ? 'ALL' : sev)}
-              className={`p-4 border cursor-pointer hover:border-white/20 transition-all text-center space-y-1 ${colorClass} ${severityFilter === sev ? 'ring-1 ring-white/20' : ''}`}
+              className={`p-4 border cursor-pointer hover:shadow-sm transition-all text-center space-y-1 ${colorClass} ${severityFilter === sev ? 'ring-1 ring-slate-400' : ''}`}
             >
               <div className="text-[10px] uppercase font-bold mono tracking-widest">{sev}</div>
               <div className="text-3xl font-black">{count}</div>
@@ -102,12 +122,12 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
       {/* Filter and search controls */}
       <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
         <div className="relative w-full md:w-80">
-          <Search className="absolute left-2.5 top-3.5 h-3.5 w-3.5 text-muted-foreground" />
+          <Search className="absolute left-2.5 top-3 h-4 w-4 text-slate-400" />
           <Input 
             placeholder="Search IPs or SNI..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="pl-8 bg-white/5 border-white/10 text-xs focus-visible:ring-primary/30"
+            className="pl-9 bg-white border-slate-200 text-xs text-slate-800 focus-visible:ring-slate-300"
           />
         </div>
         <div className="flex gap-2 w-full md:w-auto">
@@ -117,7 +137,7 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
               size="sm"
               variant={severityFilter === sev ? 'default' : 'outline'}
               onClick={() => setSeverityFilter(sev)}
-              className="uppercase mono text-[9px] font-bold"
+              className="text-[10px] font-medium"
             >
               {sev}
             </Button>
@@ -125,181 +145,225 @@ export default function ThreatAlerts({ apiEndpoint, alerts, onRefresh }) {
         </div>
       </div>
 
-      {/* Alerts list */}
-      <div className="space-y-3">
-        {filteredAlerts.length > 0 ? (
-          filteredAlerts.map(alert => {
-            const isCritical = alert.severity === 'Critical';
-            const dateStr = alert.timestamp ? new Date(alert.timestamp * 1000).toLocaleString() : 'N/A';
-            return (
-              <Card 
-                key={alert.flow_id}
-                onClick={() => handleSelectAlert(alert.flow_id)}
-                className={`p-4 border ${selectedAlertId === alert.flow_id ? 'border-primary/50' : 'border-white/5'} bg-black/40 hover:bg-black/60 transition-colors flex items-center justify-between cursor-pointer`}
-              >
-                <div className="flex items-center gap-4">
-                  <div className={`p-2 rounded-lg border ${isCritical ? 'border-threat/20 text-threat bg-threat/10' : 'border-amber-500/20 text-amber-500 bg-amber-500/10'}`}>
-                    <ShieldAlert className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-white mono">{alert.src_ip} → {alert.dst_ip}</span>
-                      <Badge variant={alert.severity.toLowerCase()}>{alert.severity}</Badge>
-                    </div>
-                    <div className="text-[10px] text-muted-foreground mono mt-1">
-                      SNI: <span className="text-primary">{alert.sni || 'N/A'}</span> • Risk Index: <span className="text-threat font-bold">{alert.risk_score}</span>
-                    </div>
-                  </div>
-                </div>
+      {/* Tabular Alerts list */}
+      <Card className="border border-slate-200 bg-white overflow-hidden shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs mono">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[9px] tracking-wider font-semibold">
+                <th className="py-3 px-4">Timestamp</th>
+                <th className="py-3 px-4">Source Socket</th>
+                <th className="py-3 px-4">Destination Socket</th>
+                <th className="py-3 px-4">SNI / Target Host</th>
+                <th className="py-3 px-4">Risk Index</th>
+                <th className="py-3 px-4">Severity</th>
+                <th className="py-3 px-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredAlerts.length > 0 ? (
+                filteredAlerts.map(alert => {
+                  const dateStr = alert.timestamp ? new Date(alert.timestamp * 1000).toLocaleString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', month: 'short', day: '2-digit' }) : 'N/A';
+                  return (
+                    <tr 
+                      key={alert.flow_id}
+                      onClick={() => handleSelectAlert(alert.flow_id)}
+                      className={`hover:bg-slate-50/50 transition-colors cursor-pointer ${selectedAlertId === alert.flow_id ? 'bg-slate-50' : ''}`}
+                    >
+                      <td className="py-3.5 px-4 text-slate-500">{dateStr}</td>
+                      <td className="py-3.5 px-4 font-semibold text-slate-800">{alert.src_ip}:{alert.src_port}</td>
+                      <td className="py-3.5 px-4 font-semibold text-slate-800">{alert.dst_ip}:{alert.dst_port}</td>
+                      <td className="py-3.5 px-4 text-indigo-600 font-medium truncate max-w-[150px]">{alert.sni || 'N/A'}</td>
+                      <td className="py-3.5 px-4 text-red-600 font-bold">{alert.risk_score}/100</td>
+                      <td className="py-3.5 px-4">
+                        <Badge variant={alert.severity.toLowerCase()}>{alert.severity}</Badge>
+                      </td>
+                      <td className="py-3.5 px-4 text-right space-x-2" onClick={e => e.stopPropagation()}>
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          onClick={() => handleSelectAlert(alert.flow_id)}
+                          className="h-7 px-2.5 text-[10px] border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                        >
+                          Inspect
+                        </Button>
+                        <Button 
+                          size="sm" 
+                          className="h-7 px-2.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                          onClick={(e) => handleAllowAlert(e, alert.flow_id)}
+                          disabled={allowLoading}
+                        >
+                          Allow
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={7} className="text-center py-20 text-xs text-slate-400 uppercase tracking-wider font-medium">
+                    No active threat alerts detected.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
-                <div className="flex items-center gap-4 text-right">
-                  <div className="hidden md:block text-[10px] text-muted-foreground mono">
-                    {dateStr}
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-muted-foreground/60" />
-                </div>
-              </Card>
-            );
-          })
-        ) : (
-          <div className="text-center py-24 text-[10px] mono text-muted-foreground uppercase tracking-widest border border-dashed border-white/5 rounded-xl bg-black/20">
-            No threat logs matching current filters.
-          </div>
-        )}
-      </div>
-
-      {/* Slide-over details drawer (Framer Motion) */}
+      {/* Threat Detail Slide-over Inspector Drawer */}
       <AnimatePresence>
         {selectedAlertId && (
-          <>
-            {/* Backdrop click barrier */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 0.5 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setSelectedAlertId(null)}
-              className="fixed inset-0 bg-black z-50 pointer-events-auto"
-            />
-            
-            {/* Drawer */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/30 backdrop-blur-xs flex justify-end"
+            onClick={() => setSelectedAlertId(null)}
+          >
             <motion.div
               initial={{ x: '100%' }}
               animate={{ x: 0 }}
               exit={{ x: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed right-0 top-0 h-full w-full max-w-[500px] bg-[#0A0A0C] border-l border-white/10 z-[100] p-6 shadow-[-10px_0_40px_rgba(0,0,0,0.8)] overflow-y-auto flex flex-col justify-between"
+              className="w-full max-w-xl bg-white border-l border-slate-200 h-full p-6 overflow-y-auto space-y-6 shadow-xl"
+              onClick={e => e.stopPropagation()}
             >
-              <div className="space-y-6">
-                {/* Header */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Shield className="w-4 h-4 text-primary" />
-                    <span className="text-[9px] mono uppercase font-bold text-muted-foreground tracking-widest">Alert Profile</span>
-                  </div>
-                  <Button size="icon" variant="ghost" onClick={() => setSelectedAlertId(null)} className="h-8 w-8 text-muted-foreground hover:text-white">
-                    <X className="w-4 h-4" />
-                  </Button>
+              {loadingDetails ? (
+                <div className="h-full flex flex-col items-center justify-center space-y-3 py-40">
+                  <Loader2 className="w-8 h-8 text-slate-800 animate-spin" />
+                  <span className="text-xs text-slate-400">Retrieving Forensic Telemetry...</span>
                 </div>
-
-                {loadingDetails ? (
-                  <div className="flex flex-col items-center justify-center py-40 space-y-3">
-                    <Loader2 className="w-8 h-8 text-primary animate-spin" />
-                    <span className="text-[10px] mono uppercase tracking-wider text-muted-foreground">Gathering forensic logs...</span>
+              ) : alertDetails ? (
+                <div className="space-y-6">
+                  {/* Drawer Header */}
+                  <div className="flex items-start justify-between border-b border-slate-200 pb-4">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant={alertDetails.severity.toLowerCase()}>{alertDetails.severity}</Badge>
+                        <Badge variant="outline" className="border-slate-200 text-slate-700 text-[9px] uppercase font-bold mono">{alertDetails.attack_category || 'Threat'}</Badge>
+                        <span className="text-[10px] mono text-slate-400 uppercase">{new Date(alertDetails.timestamp * 1000).toLocaleString()}</span>
+                      </div>
+                      <h3 className="text-base font-bold text-slate-900 mono">{alertDetails.flow_id}</h3>
+                    </div>
+                    <Button size="icon" variant="ghost" onClick={() => setSelectedAlertId(null)} className="h-8 w-8 text-slate-400 hover:text-slate-800">
+                      <X className="w-4 h-4" />
+                    </Button>
                   </div>
-                ) : alertDetails ? (
-                  <div className="space-y-6">
-                    {/* Summary profile */}
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <Badge variant={alertDetails.severity?.toLowerCase() || 'threat'}>
-                          {alertDetails.severity} SEVERITY
-                        </Badge>
-                        <span className="text-[9px] mono text-muted-foreground uppercase">Flow ID: {alertDetails.flow_id?.substring(0, 8)}</span>
-                      </div>
-                      <h3 className="text-base font-black text-white mono">{alertDetails.src_ip} → {alertDetails.dst_ip}</h3>
+
+                  {/* Summary Metric Callouts */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-4 rounded-xl border border-red-100 bg-red-50/30">
+                      <div className="text-[9px] font-bold text-red-600 uppercase tracking-wider mono">Calculated Risk Index</div>
+                      <div className="text-3xl font-black text-red-600 mt-1 mono">{alertDetails.risk_score}<span className="text-xs font-normal opacity-70">/100</span></div>
                     </div>
+                    <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50">
+                      <div className="text-[9px] font-bold text-slate-600 uppercase tracking-wider mono">ML Detection Confidence</div>
+                      <div className="text-3xl font-black text-slate-800 mt-1 mono">{alertDetails.confidence}%</div>
+                    </div>
+                  </div>
 
-                    <Separator className="bg-white/5" />
-
-                    {/* Sockets Details */}
-                    <div className="space-y-2">
-                      <h4 className="text-[9px] uppercase font-bold text-muted-foreground tracking-widest">Network Context</h4>
-                      <div className="grid grid-cols-2 gap-4 text-[10px] mono bg-white/[0.01] border border-white/5 p-3 rounded-lg">
-                        <div className="space-y-0.5">
-                          <span className="text-muted-foreground text-[8px] uppercase">Src Socket</span>
-                          <div className="text-white font-bold">{alertDetails.src_ip}:{alertDetails.src_port}</div>
-                        </div>
-                        <div className="space-y-0.5">
-                          <span className="text-muted-foreground text-[8px] uppercase">Dst Socket</span>
-                          <div className="text-white font-bold">{alertDetails.dst_ip}:{alertDetails.dst_port}</div>
-                        </div>
-                        <div className="col-span-2 space-y-0.5">
-                          <span className="text-muted-foreground text-[8px] uppercase">TLS Target Server (SNI)</span>
-                          <div className="text-primary font-bold">{alertDetails.sni || 'N/A'}</div>
-                        </div>
+                  {/* Sockets Details */}
+                  <div className="space-y-2">
+                    <h4 className="text-[9px] uppercase font-bold text-slate-400 tracking-widest">Network Context</h4>
+                    <div className="grid grid-cols-2 gap-4 text-[10px] mono bg-slate-50 border border-slate-200 p-3 rounded-lg">
+                      <div className="space-y-0.5">
+                        <span className="text-slate-400 text-[8px] uppercase">Src Socket</span>
+                        <div className="text-slate-800 font-bold">{alertDetails.src_ip}:{alertDetails.src_port}</div>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-slate-400 text-[8px] uppercase">Dst Socket</span>
+                        <div className="text-slate-800 font-bold">{alertDetails.dst_ip}:{alertDetails.dst_port}</div>
+                      </div>
+                      <div className="col-span-2 space-y-0.5">
+                        <span className="text-slate-400 text-[8px] uppercase">TLS Target Server (SNI)</span>
+                        <div className="text-indigo-600 font-bold">{alertDetails.sni || 'N/A'}</div>
                       </div>
                     </div>
+                  </div>
 
-                    {/* Reputation threat intelligence */}
-                    <div className="space-y-2">
-                      <h4 className="text-[9px] uppercase font-bold text-muted-foreground tracking-widest">Threat Intelligence Analysis</h4>
-                      <div className="grid grid-cols-3 gap-2 text-center text-[10px] mono">
-                        <div className="p-3 border border-white/5 bg-white/[0.01] rounded-lg">
-                          <div className="text-[8px] text-muted-foreground uppercase">IP score</div>
-                          <div className="text-sm font-black text-threat mt-1">{alertDetails.ip_reputation_score || 0}%</div>
-                        </div>
-                        <div className="p-3 border border-white/5 bg-white/[0.01] rounded-lg">
-                          <div className="text-[8px] text-muted-foreground uppercase">Domain reputation</div>
-                          <div className="text-sm font-black text-threat mt-1">{alertDetails.domain_reputation_score || 0}%</div>
-                        </div>
-                        <div className="p-3 border border-white/5 bg-white/[0.01] rounded-lg">
-                          <div className="text-[8px] text-muted-foreground uppercase">Cert risk</div>
-                          <div className="text-sm font-black text-amber-500 mt-1">{alertDetails.cert_risk_score || 0}/100</div>
-                        </div>
+                  {/* Reputation threat intelligence */}
+                  <div className="space-y-2">
+                    <h4 className="text-[9px] uppercase font-bold text-slate-400 tracking-widest">Threat Intelligence & Anomaly Analysis</h4>
+                    <div className="grid grid-cols-4 gap-2 text-center text-[10px] mono">
+                      <div className="p-3 border border-slate-200 bg-slate-50 rounded-lg">
+                        <div className="text-[8px] text-slate-400 uppercase">IP score</div>
+                        <div className="text-sm font-black text-red-600 mt-1">{alertDetails.ip_reputation_score || 0}%</div>
                       </div>
-                      
-                      {alertDetails.ja3_match && (
-                        <div className="p-3 border border-red-500/20 bg-red-500/[0.02] rounded-lg text-[10px] mono text-threat leading-tight flex items-start gap-2">
-                          <Info className="w-4 h-4 shrink-0 mt-0.5" />
-                          <div>
-                            <span className="font-bold uppercase tracking-wider block">Local JA3 signature match</span>
-                            <p className="opacity-95 mt-0.5">Hash matches payload signature linked to: <b>{alertDetails.ja3_threat_label}</b></p>
-                          </div>
-                        </div>
-                      )}
+                      <div className="p-3 border border-slate-200 bg-slate-50 rounded-lg">
+                        <div className="text-[8px] text-slate-400 uppercase">Domain reputation</div>
+                        <div className="text-sm font-black text-red-600 mt-1">{alertDetails.domain_reputation_score || 0}%</div>
+                      </div>
+                      <div className="p-3 border border-slate-200 bg-slate-50 rounded-lg">
+                        <div className="text-[8px] text-slate-400 uppercase">Cert risk</div>
+                        <div className="text-sm font-black text-amber-600 mt-1">{alertDetails.tls_risk_score || 0}/100</div>
+                      </div>
+                      <div className="p-3 border border-slate-200 bg-slate-50 rounded-lg">
+                        <div className="text-[8px] text-slate-400 uppercase">Zero-Day Anomaly</div>
+                        <div className={`text-sm font-black mt-1 ${alertDetails.anomaly_score > 60 ? 'text-red-600' : 'text-slate-800'}`}>{alertDetails.anomaly_score || 0}%</div>
+                      </div>
                     </div>
-
-                    {/* SHAP machine learning feature contributions */}
-                    {alertDetails.top_features && alertDetails.top_features.length > 0 && (
-                      <div className="space-y-2.5">
-                        <h4 className="text-[9px] uppercase font-bold text-muted-foreground tracking-widest">Forensic Explainer (SHAP)</h4>
-                        <div className="space-y-2.5">
-                          {alertDetails.top_features.map((feat, idx) => (
-                            <div key={idx} className="space-y-1">
-                              <div className="flex justify-between text-[9px] mono uppercase font-bold text-muted-foreground">
-                                <span className="truncate max-w-[240px]">{feat.feature}</span>
-                                <span>{(feat.importance).toFixed(4)}</span>
-                              </div>
-                              <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                                <div 
-                                  className="h-full rounded-full bg-threat" 
-                                  style={{ width: `${Math.min(100, feat.importance * 200)}%` }} 
-                                />
-                              </div>
-                            </div>
-                          ))}
+                    
+                    {alertDetails.ja3_match && (
+                      <div className="p-3 border border-red-200 bg-red-50/50 rounded-lg text-[10px] mono text-red-700 leading-tight flex items-start gap-2 mt-2">
+                        <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold uppercase tracking-wider block">Local JA3 signature match</span>
+                          <p className="opacity-95 mt-0.5">Hash matches payload signature linked to: <b>{alertDetails.ja3_threat_label}</b></p>
                         </div>
                       </div>
                     )}
                   </div>
-                ) : (
-                  <div className="text-center py-20 text-[10px] text-muted-foreground mono uppercase">
-                     forensic logs unavailable.
+
+                  {/* SHAP machine learning feature contributions */}
+                  {alertDetails.top_features && alertDetails.top_features.length > 0 && (
+                    <div className="space-y-2.5">
+                      <h4 className="text-[9px] uppercase font-bold text-slate-400 tracking-widest">Forensic Explainer (SHAP)</h4>
+                      <div className="space-y-2.5">
+                        {alertDetails.top_features.map((feat, idx) => (
+                          <div key={idx} className="space-y-1">
+                            <div className="flex justify-between text-[9px] mono uppercase font-bold text-slate-500">
+                              <span className="truncate max-w-[240px]">{feat.feature}</span>
+                              <span>{(feat.importance).toFixed(4)}</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                              <div 
+                                className="h-full rounded-full bg-red-500" 
+                                style={{ width: `${Math.min(100, feat.importance * 200)}%` }} 
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Whitelist / Allow threat drawer action */}
+                  <Separator className="bg-slate-200" />
+                  <div className="flex gap-3 justify-end pt-2">
+                    <Button 
+                      variant="outline" 
+                      onClick={() => setSelectedAlertId(null)}
+                      className="text-xs"
+                    >
+                      Cancel
+                    </Button>
+                    <Button 
+                      onClick={() => handleAllowAlert(null, alertDetails.flow_id)}
+                      disabled={allowLoading}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs gap-1.5"
+                    >
+                      <ShieldCheck className="w-4 h-4" /> Allow & Whitelist Connection
+                    </Button>
                   </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                <div className="text-center py-20 text-xs text-slate-400">
+                   forensic logs unavailable.
+                </div>
+              )}
             </motion.div>
-          </>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

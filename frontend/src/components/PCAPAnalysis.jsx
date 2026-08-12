@@ -8,6 +8,8 @@ import {
 import { cn } from '@/lib/utils';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
+import { Badge } from './ui/badge';
+import { Separator } from './ui/separator';
 
 export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
   const [file, setFile] = useState(null);
@@ -98,10 +100,10 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
   return (
     <div className="space-y-6">
       {/* Header controls panel */}
-      <div className="flex justify-between items-end border-b border-white/5 pb-6">
+      <div className="flex justify-between items-end border-b border-slate-200 pb-6">
         <div>
-          <h2 className="text-2xl font-black tracking-tight text-white uppercase italic">Offline PCAP Analysis</h2>
-          <p className="text-[10px] text-muted-foreground uppercase mono tracking-[0.15em] mt-1">
+          <h2 className="text-xl font-bold tracking-tight text-slate-900">Offline PCAP Analysis</h2>
+          <p className="text-xs text-slate-500 mt-1">
             Ingest and batch decode packet capture recordings
           </p>
         </div>
@@ -111,17 +113,16 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
         {!scanSummary ? (
           <div className="space-y-6">
             <Card className={cn(
-              "relative group cursor-pointer transition-all duration-500 border border-white/5 bg-black/40 hover:bg-black/60 overflow-hidden",
-              isDragActive ? "border-primary shadow-[0_0_30px_rgba(0,242,255,0.15)]" : "hover:border-primary/20",
-              file && "border-primary/40"
+              "relative group cursor-pointer transition-all duration-350 border bg-white overflow-hidden shadow-sm",
+              isDragActive ? "border-slate-400 bg-slate-50" : "border-slate-200 hover:border-slate-300",
+              file && "border-slate-400"
             )} {...getRootProps()}>
-              <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-primary/20 to-transparent" />
               <input {...getInputProps()} />
               
               <div className="px-12 py-20 flex flex-col items-center justify-center space-y-6">
                 <div className={cn(
-                  "w-16 h-16 rounded-2xl flex items-center justify-center border transition-all duration-500 shadow-2xl",
-                  isDragActive ? "bg-primary text-black border-primary rotate-6 scale-105" : "bg-white/5 border-white/10 text-primary group-hover:border-primary/30"
+                  "w-16 h-16 rounded-2xl flex items-center justify-center border transition-all duration-350 shadow-xs",
+                  isDragActive ? "bg-slate-900 text-white border-slate-900" : "bg-slate-50 border-slate-200 text-slate-700"
                 )}>
                   {file ? <FileIcon className="w-8 h-8" /> : <UploadIcon className="w-8 h-8" />}
                 </div>
@@ -129,17 +130,17 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
                 <div className="text-center space-y-2">
                   {file ? (
                     <div className="space-y-1">
-                      <p className="text-base font-bold text-white italic uppercase tracking-tight">{file.name}</p>
-                      <div className="flex items-center justify-center gap-2 text-[9px] mono text-primary font-bold uppercase tracking-wider">
-                         <Cpu className="w-3 h-3" /> {(file.size / (1024 * 1024)).toFixed(2)} MB • READY_FOR_DECOMPOSITION
+                      <p className="text-sm font-bold text-slate-800 mono">{file.name}</p>
+                      <div className="flex items-center justify-center gap-2 text-[10px] mono text-indigo-600 font-bold uppercase tracking-wider">
+                         <Cpu className="w-3.5 h-3.5" /> {(file.size / (1024 * 1024)).toFixed(2)} MB • Ingestion Ready
                       </div>
                     </div>
                   ) : (
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">
+                      <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">
                         {isDragActive ? "Drop binary capture here" : "Drag and drop network capture file"}
                       </p>
-                      <p className="text-[9px] text-muted-foreground mono font-bold uppercase tracking-tight opacity-40">
+                      <p className="text-[9px] text-slate-400 mono font-bold uppercase tracking-tight opacity-70">
                         Supports .pcap / .pcapng files up to 100MB
                       </p>
                     </div>
@@ -149,10 +150,10 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
             </Card>
 
             {uploading && (
-              <Card className="p-6 border border-white/5 bg-black/40 space-y-4">
+              <Card className="p-6 border border-slate-200 bg-white space-y-4 shadow-sm">
                 <div className="flex items-center gap-3">
-                  <Loader2 className="w-4 h-4 text-primary animate-spin" />
-                  <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Deconstructing Binary</span>
+                  <Loader2 className="w-4 h-4 text-slate-800 animate-spin" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">Deconstructing Binary</span>
                 </div>
                 
                 {/* Step indicator */}
@@ -164,14 +165,14 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
                       <div key={idx} className="flex items-center gap-3 text-[10px] mono">
                         <div className={cn(
                           "w-4 h-4 rounded-full border flex items-center justify-center text-[8px] font-bold",
-                          isPassed ? "bg-primary border-primary text-black" : 
-                          isActive ? "border-primary text-primary animate-pulse" : "border-white/10 text-muted-foreground"
+                          isPassed ? "bg-slate-900 border-slate-900 text-white" : 
+                          isActive ? "border-slate-900 text-slate-900 animate-pulse" : "border-slate-200 text-slate-400"
                         )}>
                           {isPassed ? "✓" : idx + 1}
                         </div>
                         <span className={cn(
-                          isPassed ? "text-slate-300 line-through opacity-50" : 
-                          isActive ? "text-primary font-bold" : "text-muted-foreground"
+                          isPassed ? "text-slate-400 line-through opacity-60" : 
+                          isActive ? "text-slate-900 font-bold" : "text-slate-400"
                         )}>{step}</span>
                       </div>
                     );
@@ -181,7 +182,7 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
             )}
 
             {error && (
-              <div className="border border-threat/20 bg-threat/5 text-threat p-4 rounded-xl flex items-start gap-3 animate-in shake-1 duration-300">
+              <div className="border border-red-200 bg-red-50 text-red-700 p-4 rounded-xl flex items-start gap-3 animate-in shake-1 duration-300">
                 <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
                 <div className="text-[10px] font-bold uppercase mono leading-tight">
                   <p>Deconstruction Interrupted</p>
@@ -192,15 +193,15 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
 
             <div className="flex gap-4 items-center justify-center">
               {file && (
-                <Button variant="ghost" onClick={handleReset} disabled={uploading} className="uppercase mono text-[9px] font-bold text-muted-foreground hover:text-threat">
+                <Button variant="ghost" onClick={handleReset} disabled={uploading} className="text-xs text-slate-500 hover:text-red-600">
                   <X className="w-4 h-4 mr-2" /> Discard
                 </Button>
               )}
               <Button 
                 size="lg" 
                 className={cn(
-                  "min-w-64 uppercase mono text-[10px] font-black tracking-widest transition-all",
-                  file && !uploading && "bg-primary text-black hover:bg-primary/80 shadow-[0_0_20px_rgba(0,242,255,0.3)]"
+                  "min-w-64 uppercase mono text-[10px] font-bold tracking-widest transition-all",
+                  file && !uploading ? "bg-slate-900 hover:bg-slate-800 text-white shadow-xs" : "bg-slate-100 text-slate-400"
                 )}
                 disabled={!file || uploading}
                 onClick={handleUpload}
@@ -216,51 +217,51 @@ export default function PCAPAnalysis({ apiEndpoint, onResultsAvailable }) {
             className="space-y-6"
           >
             {/* Ingestion Report Dashboard */}
-            <Card className="p-6 border border-white/5 bg-black/40 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-[3px] bg-gradient-to-r from-benign to-primary" />
+            <Card className="p-6 border border-slate-200 bg-white relative overflow-hidden shadow-sm">
+              <div className="absolute top-0 left-0 w-full h-[3px] bg-slate-900" />
               <div className="flex justify-between items-start">
                 <div className="space-y-1">
-                  <div className="flex items-center gap-1.5 text-benign text-[10px] font-bold uppercase tracking-wider">
-                    <ShieldCheck className="w-4 h-4" /> Trace Scan Complete
+                  <div className="flex items-center gap-1.5 text-emerald-600 text-[10px] font-bold uppercase tracking-wider">
+                    <ShieldCheck className="w-4 h-4" /> Trace Ingestion Complete
                   </div>
-                  <h3 className="text-lg font-black text-white uppercase italic">{file?.name}</h3>
-                  <p className="text-[9px] text-muted-foreground uppercase mono mt-1">Ingestion Session Log Summary</p>
+                  <h3 className="text-base font-bold text-slate-800 mono">{file?.name}</h3>
+                  <p className="text-[9px] text-slate-400 uppercase mono mt-1">Ingestion Session Log Summary</p>
                 </div>
-                <Button onClick={handleReset} variant="outline" className="border-white/10 hover:bg-white/5 uppercase mono text-[9px] font-bold">
+                <Button onClick={handleReset} variant="outline" className="border-slate-200 bg-white hover:bg-slate-50 text-[10px] font-bold uppercase mono">
                   Reset Ingestor
                 </Button>
               </div>
 
-              <Separator className="bg-white/5 my-6" />
+              <Separator className="bg-slate-200 my-6" />
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="p-4 border border-white/5 bg-white/[0.01] rounded-xl text-center space-y-1">
-                  <div className="text-[10px] text-muted-foreground uppercase font-bold mono">Flows Parsed</div>
-                  <div className="text-3xl font-black text-white">{scanSummary.total_flows}</div>
+                <div className="p-4 border border-slate-200 bg-slate-50 rounded-xl text-center space-y-1">
+                  <div className="text-[10px] text-slate-500 uppercase font-bold mono">Flows Parsed</div>
+                  <div className="text-3xl font-bold text-slate-800 mono">{scanSummary.total_flows}</div>
                 </div>
-                <div className="p-4 border border-white/5 bg-white/[0.01] rounded-xl text-center space-y-1">
-                  <div className="text-[10px] text-muted-foreground uppercase font-bold mono">Threats Flagged</div>
-                  <div className="text-3xl font-black text-threat animate-pulse">{scanSummary.threat_count}</div>
+                <div className="p-4 border border-red-200 bg-red-50/20 rounded-xl text-center space-y-1">
+                  <div className="text-[10px] text-red-600 uppercase font-bold mono">Threats Flagged</div>
+                  <div className="text-3xl font-bold text-red-600 mono">{scanSummary.threat_count}</div>
                 </div>
-                <div className="p-4 border border-white/5 bg-white/[0.01] rounded-xl text-center space-y-1">
-                  <div className="text-[10px] text-muted-foreground uppercase font-bold mono">Benign Count</div>
-                  <div className="text-3xl font-black text-benign">{scanSummary.benign_count}</div>
+                <div className="p-4 border border-slate-200 bg-slate-50 rounded-xl text-center space-y-1">
+                  <div className="text-[10px] text-emerald-600 uppercase font-bold mono">Benign Count</div>
+                  <div className="text-3xl font-bold text-emerald-600 mono">{scanSummary.benign_count}</div>
                 </div>
               </div>
 
               {/* Show top 5 threats identified */}
               {scanSummary.threat_count > 0 && (
                 <div className="mt-8 space-y-3">
-                  <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">Top Detected Alerts</div>
-                  <div className="border border-white/5 rounded-xl divide-y divide-white/5 overflow-hidden">
-                    {scanSummary.results.filter(r => r.prediction === 'Threat').slice(0, 5).map((row, idx) => (
-                      <div key={idx} className="p-3 bg-threat/[0.01] flex items-center justify-between text-[10px] mono">
+                  <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Top Detected Alerts</div>
+                  <div className="border border-slate-200 bg-white rounded-xl divide-y divide-slate-100 overflow-hidden">
+                    {scanSummary.results.filter(r => (r.classification || r.prediction) === 'Threat').slice(0, 5).map((row, idx) => (
+                      <div key={idx} className="p-3 bg-red-50/10 flex items-center justify-between text-[10px] mono">
                         <div className="flex items-center gap-4">
-                          <span className="text-threat font-bold">ALERT #{idx + 1}</span>
-                          <span className="font-medium text-slate-300">{row.src_ip}:{row.src_port} → {row.dst_ip}:{row.dst_port}</span>
+                          <span className="text-red-600 font-bold">ALERT #{idx + 1}</span>
+                          <span className="font-medium text-slate-700">{row.src_ip}:{row.src_port} → {row.dst_ip}:{row.dst_port}</span>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="text-muted-foreground truncate max-w-[120px]">{row.sni || 'N/A'}</span>
+                          <span className="text-slate-500 truncate max-w-[120px]">{row.sni || 'N/A'}</span>
                           <Badge variant="threat">{row.confidence}% Confidence</Badge>
                         </div>
                       </div>

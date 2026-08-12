@@ -81,8 +81,8 @@ export default function Auth({ onLoginSuccess }) {
             <Shield className="w-8 h-8" />
           </div>
           <div>
-            <h1 className="text-xl font-black uppercase tracking-tight italic text-white leading-none">Zenith Threat Detection</h1>
-            <p className="text-[10px] text-muted-foreground uppercase mono tracking-[0.2em] mt-1.5">Security Operations Center Portal</p>
+            <h1 className="text-xl font-black uppercase tracking-tight italic text-white leading-none">Encrypted Threat Detector</h1>
+            <p className="text-[10px] text-muted-foreground uppercase mono tracking-[0.2em] mt-1.5 font-semibold">Security Operations Center Portal</p>
           </div>
         </div>
 
