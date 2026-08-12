@@ -5,34 +5,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.database import init_db
 from src.detection.model import load_model_assets
 from src.api.websocket import manager
-from .routes import upload, capture, flows, alerts, analytics, reports
+from .routes import upload, capture, flows, alerts, analytics, reports, settings
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("zenith")
+logger = logging.getLogger("threat_detector")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup tasks
-    logger.info("Starting up Zenith Engine...")
+    logger.info("Starting up Threat Detection Engine...")
     try:
+        import os
+        from src.api.routes.settings import load_system_config
+        cfg = load_system_config()
+        os.environ["ABUSEIPDB_API_KEY"] = cfg.get("abuseipdb_key", "")
+        os.environ["VIRUSTOTAL_API_KEY"] = cfg.get("virustotal_key", "")
+        
         # Initialize database tables & indexes
         await init_db()
         # Initialize model singletons into RAM
         load_model_assets()
-        logger.info("Zenith Engine initialization successful.")
+        logger.info("Threat Detection Engine initialization successful.")
     except Exception as e:
-        logger.error(f"Failed during Zenith Engine initialization: {e}")
+        logger.error(f"Failed during Threat Detection Engine initialization: {e}")
     
     yield
     # Shutdown tasks
-    logger.info("Shutting down Zenith Engine...")
+    logger.info("Shutting down Threat Detection Engine...")
 
 app = FastAPI(
-    title="Zenith | Encrypted Traffic Detector",
+    title="NetFlow Security Monitor",
     version="1.1.0",
     lifespan=lifespan
 )
@@ -52,6 +58,7 @@ app.include_router(flows.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -80,7 +87,7 @@ def health():
 def read_root():
     return {
         "status": "online",
-        "service": "Zenith Encrypted Traffic Threat Detection API Gateway",
+        "service": "Encrypted Traffic Threat Detection API Gateway",
         "docs_url": "/docs",
         "health_check": "/health"
     }

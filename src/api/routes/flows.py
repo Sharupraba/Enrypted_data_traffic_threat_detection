@@ -27,3 +27,14 @@ async def purge_flows():
     """
     await clear_database()
     return {"status": "cleared", "message": "Flow database purged successfully."}
+
+@router.post("/flows/{flow_id}/allow")
+async def allow_flow(flow_id: str):
+    """
+    Whitelist / allow a specific flow, marking it as Safe and Benign.
+    """
+    from src.api.database import update_flow_status
+    success = await update_flow_status(flow_id, classification="Benign", severity="Safe", risk_score=0, attack_category="Benign")
+    if not success:
+        raise HTTPException(status_code=404, detail="Flow record not found.")
+    return {"status": "success", "message": "Flow whitelisted/allowed successfully."}
